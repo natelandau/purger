@@ -63,6 +63,14 @@ def test_plugin_rejects_empty_actions() -> None:
         make_plugin(actions=())
 
 
+@pytest.mark.parametrize("help_text", ["", "   "])
+def test_action_requires_help(help_text: str) -> None:
+    """Verify every action explains itself, since prompts show the help in place of the name."""
+    # Given / When / Then
+    with pytest.raises(ValueError, match="needs help text"):
+        make_action(help=help_text)
+
+
 def test_plugin_rejects_unknown_platform() -> None:
     """Verify only darwin and linux platforms are accepted."""
     # Given / When / Then

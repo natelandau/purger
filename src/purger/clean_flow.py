@@ -36,14 +36,17 @@ class _Entry:
 def safe_prompt(items: list[tuple[str, ActionReport]]) -> str:
     """Build the single confirmation text for all SAFE actions.
 
-    Naming each action as `plugin/action`, marked `(sudo)` when it runs with
-    sudo, lets the user see exactly what will run before agreeing to the batch.
+    The prompt names tools rather than actions, so users never need to know
+    which commands purger runs. A tool is marked `(sudo)` when any of its
+    actions runs with sudo, so the user knows before agreeing to the batch.
     """
+    sudo_tools: dict[str, bool] = {}
+    for plugin, report in items:
+        sudo_tools[plugin] = sudo_tools.get(plugin, False) or report.action.needs_sudo
     names = ", ".join(
-        f"{plugin}/{report.action.name}" + (" (sudo)" if report.action.needs_sudo else "")
-        for plugin, report in items
+        f"{plugin} (sudo)" if needs_sudo else plugin for plugin, needs_sudo in sudo_tools.items()
     )
-    text = f"Run {len(items)} safe cleanup(s): {names}"
+    text = f"Run safe cleanups for {names}"
     sizes = [report.size_bytes for _, report in items]
     total = sum_known(sizes) if None not in sizes else None
     if total is not None:
@@ -52,13 +55,15 @@ def safe_prompt(items: list[tuple[str, ActionReport]]) -> str:
 
 
 def risky_prompt(plugin_name: str, report: ActionReport) -> str:
-    """Build the per-action confirmation text for a CAUTION or DANGEROUS action."""
+    """Build the per-action confirmation text for a CAUTION or DANGEROUS action.
+
+    The help sentence explains the cost in plain words, so it stands in for the
+    action name.
+    """
     action = report.action
-    text = f"Run {plugin_name}/{action.name}"
+    text = f"{plugin_name}: {action.help.strip().rstrip('.')}"
     if report.size_bytes is not None:
         text += f" (about {human_size(report.size_bytes)})"
-    if action.help:
-        text += f": {action.help}"
     if action.tier is Tier.DANGEROUS:
         text += ". This may permanently delete data"
     if action.needs_sudo:

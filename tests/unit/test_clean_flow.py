@@ -256,7 +256,7 @@ def test_plan_clean_returns_plugin_order() -> None:
     )
 
     # Then SAFE prompt is first, caution second, result in plugin order
-    assert "one/s" in confirm.prompts[0]
+    assert confirm.prompts[0].startswith("Run safe cleanups for one, two")
     assert confirm.prompts[1] == risky_prompt("one", rep1.actions[0])
     assert approved == [rep1.actions[0], rep1.actions[1], rep2.actions[0]]
 
@@ -303,24 +303,37 @@ def test_safe_prompt_total_only_when_all_sized() -> None:
     unsized = safe_prompt([("p", a), ("p", c)])
 
     # Then only the fully sized one has the total
-    assert human_size(2_000_000) in sized
-    assert "p/a" in sized
-    assert "about" not in unsized
+    assert sized == f"Run safe cleanups for p (about {human_size(2_000_000)})?"
+    assert unsized == "Run safe cleanups for p?"
 
 
-def test_safe_prompt_names_sudo_actions() -> None:
-    """Verify the SAFE prompt marks exactly the actions that run with sudo."""
-    # Given one sudo action and one plain action
-    a = ActionReport(action=make_action(name="a", needs_sudo=True), size_bytes=1, resolved_paths=[])
-    b = ActionReport(action=make_action(name="b"), size_bytes=1, resolved_paths=[])
+def test_safe_prompt_names_sudo_tools() -> None:
+    """Verify the SAFE prompt marks exactly the tools with an action that runs with sudo."""
+    # Given a tool with a sudo action and a tool without one, sizes unknown
+    a = ActionReport(
+        action=make_action(name="a", needs_sudo=True), size_bytes=None, resolved_paths=[]
+    )
+    b = ActionReport(action=make_action(name="b"), size_bytes=None, resolved_paths=[])
 
     # When
-    text = safe_prompt([("p", a), ("p", b)])
+    text = safe_prompt([("apt", a), ("go", b)])
 
     # Then
-    assert "p/a (sudo)" in text
-    assert "p/b (sudo)" not in text
-    assert "sudo" not in safe_prompt([("p", b)])
+    assert text == "Run safe cleanups for apt (sudo), go?"
+    assert "sudo" not in safe_prompt([("go", b)])
+
+
+def test_safe_prompt_names_tools_once() -> None:
+    """Verify the SAFE prompt names each tool once, in order, and never the actions."""
+    # Given two npm actions and one go action
+    items = [
+        ("npm", ActionReport(action=make_action(name="verify"), size_bytes=5, resolved_paths=[])),
+        ("npm", ActionReport(action=make_action(name="npx"), size_bytes=7, resolved_paths=[])),
+        ("go", ActionReport(action=make_action(name="build"), size_bytes=3, resolved_paths=[])),
+    ]
+
+    # When / Then
+    assert safe_prompt(items) == f"Run safe cleanups for npm, go (about {human_size(15)})?"
 
 
 def test_risky_prompt_text() -> None:
@@ -378,6 +391,35 @@ def test_plan_clean_interactive_safe_sudo_never_probes_sudo(mocker: MockerFixtur
     # Then it is approved and sudo is never probed
     assert approved == rep.actions
     sudo_ready.assert_not_called()
+
+
+@pytest.mark.parametrize("help_text", ["Drops stuff", "Drops stuff."])
+def test_risky_prompt_names_tool_and_help(help_text: str) -> None:
+    """Verify the risky prompt leads with the tool and the help sentence, never the action name."""
+    # Given a sized caution action, with or without a final period in its help
+    c = ActionReport(
+        action=make_action(name="c", tier=Tier.CAUTION, help=help_text),
+        size_bytes=5,
+        resolved_paths=[],
+    )
+
+    # When / Then
+    assert risky_prompt("p", c) == f"p: Drops stuff (about {human_size(5)}). Continue?"
+
+
+def test_risky_prompt_dangerous_sudo_wording() -> None:
+    """Verify dangerous and sudo suffixes follow the help with single periods."""
+    # Given an unsized dangerous sudo action
+    d = ActionReport(
+        action=make_action(name="d", tier=Tier.DANGEROUS, help="Nukes stuff", needs_sudo=True),
+        size_bytes=None,
+        resolved_paths=[],
+    )
+
+    # When / Then
+    assert risky_prompt("p", d) == (
+        "p: Nukes stuff. This may permanently delete data. Requires sudo. Continue?"
+    )
 
 
 def test_risky_prompt_mentions_sudo() -> None:

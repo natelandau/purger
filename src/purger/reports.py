@@ -46,6 +46,7 @@ class PluginReport:
     footprint_bytes: int | None
     actions: list[ActionReport]
     freed_bytes: int | None = None
+    after_bytes: int | None = None
 
 
 @dataclass(frozen=True)

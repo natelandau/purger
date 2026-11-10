@@ -45,13 +45,13 @@ Run purger as your normal user. purger refuses to run as root. It asks for sudo 
 
 ## Quick start
 
-Start with `purger info`. It measures each cache and prints a table with the size of each one. It deletes nothing.
+Start with `purger info`. It measures each cache and prints a table with one row for each tool: the size of its cache and a short description. A check in the `Partial purge` column means that a clean removes only part of that size. `purger info` deletes nothing.
 
 ```bash
 purger info
 ```
 
-Then run `purger clean`. It prints the same table, asks for confirmation, and runs the actions that you approve. At the end, it shows the space that each plugin freed.
+Then run `purger clean`. It prints the same table, asks for confirmation, and runs the cleanups that you approve. At the end, it prints a table with the size of each cache before and after the clean, and the space that was freed.
 
 ```bash
 purger clean

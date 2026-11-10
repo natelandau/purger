@@ -30,7 +30,7 @@ class Action:
 
     Raises:
         ValueError: If the name is not kebab-case, neither command nor paths
-            is set, or needs_sudo is set without a command.
+            is set, needs_sudo is set without a command, or help is empty.
     """
 
     name: str
@@ -54,6 +54,9 @@ class Action:
             raise ValueError(msg)
         if self.needs_sudo and self.command is None:
             msg = f"action {self.name!r} sets needs_sudo without a command"
+            raise ValueError(msg)
+        if not self.help.strip():
+            msg = f"action {self.name!r} needs help text, which confirmation prompts show"
             raise ValueError(msg)
 
 
