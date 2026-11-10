@@ -26,7 +26,9 @@ class Action:
     command runs and the paths are used to size and list what it removes.
     Set `outside_footprint` when the plugin's own
     footprint does not cover this action's data, so its size is added to the
-    footprint whenever the action is measured.
+    footprint whenever the action is measured. Set `explain_failure` to turn
+    a failed command's stderr into a hint about the likely cause; it returns
+    None when it has nothing to add.
 
     Raises:
         ValueError: If the name is not kebab-case, neither command nor paths
@@ -43,6 +45,7 @@ class Action:
     size: Callable[[], int | None] | None = None
     needs_sudo: bool = False
     outside_footprint: bool = False
+    explain_failure: Callable[[str], str | None] | None = None
 
     def __post_init__(self) -> None:
         """Validate the action's invariants."""

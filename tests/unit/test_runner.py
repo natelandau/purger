@@ -304,6 +304,72 @@ def test_describe_does_not_repeat_stderr_in_built_message() -> None:
     assert message.count("disk full") == 1
 
 
+def test_describe_leads_with_explain_hint() -> None:
+    """Verify an action's hint leads the message and the tool output still follows."""
+    # Given
+    exc = ShellCommandFailedError(result=_completed(stderr="  ENOTEMPTY \n"))
+    seen: list[str] = []
+
+    def explain(stderr: str) -> str:
+        seen.append(stderr)
+        return "a hint"
+
+    # When
+    message = _describe_failure(exc, explain=explain)
+
+    # Then
+    assert seen == ["ENOTEMPTY"]
+    assert message.startswith("a hint\n")
+    assert message.count("ENOTEMPTY") == 1
+
+
+@pytest.mark.parametrize("stderr", ["", "   "])
+def test_describe_skips_explain_without_stderr(stderr: str) -> None:
+    """Verify the hint hook is not called when the command printed no stderr."""
+    # Given
+    exc = ShellCommandFailedError(result=_completed(stderr=stderr), msg="boom")
+
+    def explain(_stderr: str) -> str:
+        pytest.fail("explain must not run without stderr")
+
+    # When
+    message = _describe_failure(exc, explain=explain)
+
+    # Then
+    assert message == "boom"
+
+
+def test_describe_keeps_message_when_explain_returns_none() -> None:
+    """Verify a hook with nothing to add leaves the message unchanged."""
+    # Given
+    exc = ShellCommandFailedError(result=_completed(stderr="disk full"), msg="boom")
+
+    # When
+    message = _describe_failure(exc, explain=lambda _stderr: None)
+
+    # Then
+    assert message == "boom: disk full"
+
+
+def test_run_action_failure_uses_action_explain_hook(mocker: MockerFixture) -> None:
+    """Verify a failed command's report carries the hint from the action's hook."""
+    # Given
+    mocker.patch(
+        "purger.runner.run_command",
+        autospec=True,
+        side_effect=ShellCommandFailedError(result=_completed(stderr="ENOTEMPTY")),
+    )
+    report = _report(command=("tool",), explain_failure=lambda _stderr: "a hint")
+
+    # When
+    run_action(report, home=Path("/unused"), verbose=False, interactive=True)
+
+    # Then
+    assert report.status == Status.FAILED
+    assert report.error is not None
+    assert report.error.startswith("a hint\n")
+
+
 def test_sudo_ready_false_on_timeout(mocker: MockerFixture) -> None:
     """Verify sudo_ready is False when the probe times out."""
     # Given
