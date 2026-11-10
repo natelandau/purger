@@ -79,8 +79,9 @@ def _footprint(cleanup_output: str) -> int:
     """Size both actions together without counting a path twice.
 
     Cleanup removes old versions of formulae that autoremove also uninstalls, so
-    summing the two action sizes counts those versions twice. Only the versions
-    cleanup leaves behind are added to its total.
+    summing the two action sizes counts those versions twice. The formula
+    folders autoremove deletes are added to cleanup's total, less the old
+    versions inside them that cleanup already counted.
 
     Args:
         cleanup_output: Standard output of `brew cleanup --prune=all --dry-run`.
@@ -94,14 +95,8 @@ def _footprint(cleanup_output: str) -> int:
     except ShellCommandError:
         return cleanup
     cleaned = {Path(path) for path in _WOULD_REMOVE.findall(cleanup_output)}
-    remaining = (
-        version
-        for rack in racks
-        if rack.is_dir()
-        for version in rack.iterdir()
-        if version not in cleaned
-    )
-    return cleanup + disk_usage(remaining)
+    overlap = [version for version in cleaned if version.parent in racks]
+    return cleanup + max(disk_usage(racks) - disk_usage(overlap), 0)
 
 
 PLUGIN = Plugin(
