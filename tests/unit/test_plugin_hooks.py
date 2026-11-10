@@ -1,8 +1,10 @@
 """Tests for plugin size-parsing and availability hooks."""
 
+import json
 from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
+from unittest.mock import MagicMock
 
 import pytest
 from nclutils.sh import CompletedCommand, ShellCommandNotFoundError
@@ -107,14 +109,24 @@ def test_docker_measurement_runs_system_df_once(mocker: MockerFixture) -> None:
     assert report.footprint_bytes == 3_000_000
 
 
+def _patch_docker(
+    mocker: MockerFixture, *, context_host: str = "unix:///var/run/docker.sock", info_rc: int = 0
+) -> MagicMock:
+    """Answer the docker context query and docker info, and return the docker info mock."""
+    mocker.patch(
+        "purger.plugins.docker.run_command",
+        autospec=True,
+        return_value=_completed(stdout=f"{context_host}\n"),
+    )
+    return mocker.patch(
+        "purger.runner.run_command", autospec=True, return_value=_completed(returncode=info_rc)
+    )
+
+
 def test_docker_is_available_false_when_daemon_down(mocker: MockerFixture) -> None:
     """Verify docker is unavailable when docker info exits non-zero."""
     # Given
-    mocker.patch(
-        "purger.runner.run_command",
-        autospec=True,
-        return_value=_completed(returncode=1),
-    )
+    _patch_docker(mocker, info_rc=1)
 
     # When / Then
     assert docker._is_available() is False
@@ -124,7 +136,7 @@ def test_docker_is_available_false_on_shell_error(mocker: MockerFixture) -> None
     """Verify docker is unavailable when the command cannot run."""
     # Given
     mocker.patch(
-        "purger.runner.run_command",
+        "purger.plugins.docker.run_command",
         autospec=True,
         side_effect=ShellCommandNotFoundError(argv=["docker"]),
     )
@@ -133,13 +145,39 @@ def test_docker_is_available_false_on_shell_error(mocker: MockerFixture) -> None
     assert docker._is_available() is False
 
 
-def test_docker_is_available_true_when_daemon_up(mocker: MockerFixture) -> None:
-    """Verify docker is available when docker info succeeds."""
+@pytest.mark.parametrize(
+    "context_host",
+    [
+        "unix:///var/run/docker.sock",
+        "unix:///Users/me/.orbstack/run/docker.sock",
+        "unix:///Users/me/.docker/run/docker.sock",
+    ],
+)
+def test_docker_is_available_true_for_a_local_engine(
+    mocker: MockerFixture, context_host: str
+) -> None:
+    """Verify docker is available when the context is a unix socket and docker info succeeds."""
     # Given
-    mocker.patch("purger.runner.run_command", autospec=True, return_value=_completed())
+    _patch_docker(mocker, context_host=context_host)
 
     # When / Then
     assert docker._is_available() is True
+
+
+@pytest.mark.parametrize(
+    "context_host",
+    ["tcp://10.0.0.5:2375", "ssh://me@build-host", "tcp://127.0.0.1:2375", ""],
+)
+def test_docker_is_unavailable_for_a_remote_engine(
+    mocker: MockerFixture, context_host: str
+) -> None:
+    """Verify a TCP or SSH context, even on loopback, never reaches docker info or a prune."""
+    # Given
+    info = _patch_docker(mocker, context_host=context_host)
+
+    # When / Then
+    assert docker._is_available() is False
+    info.assert_not_called()
 
 
 def test_brew_autoremove_names_strip_header_and_tap() -> None:
@@ -697,16 +735,101 @@ def test_podman_sums_raw_reclaimable(types: frozenset[str], expected: int) -> No
     assert podman._reclaimable_from(_PODMAN_DF, types=types) == expected
 
 
+def _patch_podman(
+    mocker: MockerFixture, *, info: str | None, connections: list[dict[str, object]] | None = None
+) -> None:
+    """Answer podman info and podman system connection list; None makes that command fail."""
+
+    def answer(argv: list[str], **_: object) -> CompletedCommand:
+        out = (
+            info if argv[1] == "info" else None if connections is None else json.dumps(connections)
+        )
+        return _completed(returncode=125) if out is None else _completed(stdout=out)
+
+    mocker.patch("purger.plugins.podman.run_command", autospec=True, side_effect=answer)
+
+
+def _podman_info(*, remote: bool) -> str:
+    return json.dumps({"host": {"serviceIsRemote": remote}})
+
+
+_MACHINE: dict[str, object] = {
+    "Name": "podman-machine-default",
+    "URI": "ssh://core@127.0.0.1:53298/run/user/501/podman/podman.sock",
+    "IsMachine": True,
+    "Default": True,
+}
+_REMOTE: dict[str, object] = {
+    "Name": "prod",
+    "URI": "ssh://root@example.com/run/podman/podman.sock",
+    "IsMachine": False,
+    "Default": False,
+}
+
+
 def test_podman_unavailable_when_info_fails(mocker: MockerFixture) -> None:
     """Verify podman is skipped when it does not answer, such as a stopped machine on macOS."""
     # Given
-    mocker.patch(
-        "purger.runner.run_command", autospec=True, return_value=_completed(returncode=125)
-    )
+    _patch_podman(mocker, info=None)
     assert podman.PLUGIN.is_available is not None
 
     # When / Then
     assert podman.PLUGIN.is_available() is False
+
+
+def test_podman_available_for_a_local_service(mocker: MockerFixture) -> None:
+    """Verify native podman on Linux, whose service is not remote, is available."""
+    # Given
+    _patch_podman(mocker, info=_podman_info(remote=False))
+
+    # When / Then
+    assert podman._is_available() is True
+
+
+def test_podman_available_through_a_podman_machine(
+    mocker: MockerFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify the default podman machine connection on macOS counts as local."""
+    # Given
+    monkeypatch.delenv("CONTAINER_HOST", raising=False)
+    monkeypatch.delenv("CONTAINER_CONNECTION", raising=False)
+    _patch_podman(mocker, info=_podman_info(remote=True), connections=[_MACHINE, _REMOTE])
+
+    # When / Then
+    assert podman._is_available() is True
+
+
+@pytest.mark.parametrize(
+    ("env", "connections"),
+    [
+        ({"CONTAINER_CONNECTION": "prod"}, [_MACHINE, _REMOTE]),
+        ({}, [{**_MACHINE, "Default": False}, {**_REMOTE, "Default": True}]),
+        ({"CONTAINER_HOST": "ssh://root@example.com/run/podman/podman.sock"}, [_MACHINE]),
+        ({"CONTAINER_HOST": "tcp://127.0.0.1:34451"}, [_MACHINE]),
+        ({"CONTAINER_CONNECTION": "missing"}, [_MACHINE]),
+        (
+            {"CONTAINER_HOST": "unix:///run/podman/podman.sock", "CONTAINER_CONNECTION": "prod"},
+            [_MACHINE, _REMOTE],
+        ),
+        ({}, None),
+    ],
+)
+def test_podman_unavailable_for_a_remote_service(
+    mocker: MockerFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    env: dict[str, str],
+    connections: list[dict[str, object]] | None,
+) -> None:
+    """Verify a connection to another host, or one podman cannot name, is never available."""
+    # Given
+    monkeypatch.delenv("CONTAINER_HOST", raising=False)
+    monkeypatch.delenv("CONTAINER_CONNECTION", raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    _patch_podman(mocker, info=_podman_info(remote=True), connections=connections)
+
+    # When / Then
+    assert podman._is_available() is False
 
 
 @pytest.mark.parametrize(

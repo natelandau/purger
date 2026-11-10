@@ -1,8 +1,11 @@
 """Plugin for Docker images, containers, build cache, and volumes."""
 
 import json
+import logging
 import re
 from functools import partial
+
+from nclutils.sh import ShellCommandError, run_command
 
 from purger.plugin import Action, Plugin, Tier
 from purger.runner import command_succeeds
@@ -12,15 +15,42 @@ _DF_CMD = ("docker", "system", "df", "--format", "json")
 _PERCENT_SUFFIX = re.compile(r"\s*\(\d+(?:\.\d+)?%\)\s*$")
 
 _REMOVABLE = frozenset({"Images", "Containers", "Build Cache"})
+_CONTEXT_HOST_CMD = ("docker", "context", "inspect", "--format", "{{.Endpoints.docker.Host}}")
+
+logger = logging.getLogger(__name__)
+
+
+def _engine_is_local() -> bool:
+    """Report whether the active Docker context points at an engine on this machine.
+
+    `docker context inspect` reads local configuration, honors `DOCKER_HOST` and
+    `DOCKER_CONTEXT`, and never dials the engine. Only a unix socket counts as
+    local, since a TCP or SSH endpoint, even on loopback, can tunnel to another host.
+
+    Returns:
+        bool: True when the endpoint is a `unix://` socket.
+    """
+    try:
+        result = run_command(list(_CONTEXT_HOST_CMD), check=False, timeout=10)
+    except ShellCommandError as exc:
+        logger.debug("cannot read the docker context: %s", exc)
+        return False
+    host = result.stdout.strip()
+    if result.ok and host.startswith("unix://"):
+        return True
+    logger.debug("skipping docker: the active context's endpoint is not local: %r", host)
+    return False
 
 
 def _is_available() -> bool:
-    """Report whether the Docker daemon answers.
+    """Report whether a Docker engine on this machine answers.
+
+    A remote engine is never available, so a prune cannot reach another host.
 
     Returns:
-        bool: True when `docker info` succeeds.
+        bool: True when the context is local and `docker info` succeeds.
     """
-    return command_succeeds(["docker", "info"], timeout=10)
+    return _engine_is_local() and command_succeeds(["docker", "info"], timeout=10)
 
 
 def _reclaimable_from(output: str, types: frozenset[str]) -> int:
