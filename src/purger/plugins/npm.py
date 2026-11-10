@@ -12,7 +12,8 @@ PLUGIN = Plugin(
     description="npm package cache and npx cache",
     requires="npm",
     size_cmd=_CACHE_DIR_CMD,
-    parse_size=printed_dir_usage,
+    # Only the parts purger can clean, so the two cleanups account for the whole footprint.
+    parse_size=partial(printed_dir_usage, patterns=("_cacache", "_npx")),
     actions=(
         Action(
             name="verify",

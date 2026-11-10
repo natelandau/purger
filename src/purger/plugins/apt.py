@@ -7,7 +7,8 @@ PLUGIN = Plugin(
     description="apt downloaded package files",
     platforms=frozenset({"linux"}),
     requires="apt-get",
-    paths=("/var/cache/apt/archives",),
+    # Only the package files, so the clean action's size accounts for the whole footprint.
+    paths=("/var/cache/apt/archives/*.deb",),
     actions=(
         Action(
             name="autoclean",

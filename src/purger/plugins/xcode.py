@@ -25,7 +25,10 @@ PLUGIN = Plugin(
         Action(
             name="archives",
             tier=Tier.DANGEROUS,
-            help="Contains dSYMs needed to symbolicate shipped apps. Deleted archives cannot be rebuilt.",
+            help=(
+                "Remove app archives, which hold the dSYMs needed to symbolicate shipped apps. "
+                "Deleted archives cannot be rebuilt."
+            ),
             paths=("~/Library/Developer/Xcode/Archives/*",),
         ),
     ),

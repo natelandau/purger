@@ -198,3 +198,16 @@ def test_mise_prune_counts_outside_footprint() -> None:
 
     # Then
     assert flags == {"cache-prune": False, "prune": True, "cache-clear": False}
+
+
+@pytest.mark.parametrize("plugin", _PLUGINS, ids=lambda p: p.name)
+def test_plugin_action_help_starts_with_a_verb(plugin: Plugin) -> None:
+    """Verify every action's help says what it does, since prompts show it in place of the name."""
+    # Given
+    verbs = {"Remove", "Wipe", "Uninstall", "Garbage-collect"}
+
+    # When
+    first_words = {action.name: action.help.split(" ", 1)[0] for action in plugin.actions}
+
+    # Then
+    assert {name: word for name, word in first_words.items() if word not in verbs} == {}

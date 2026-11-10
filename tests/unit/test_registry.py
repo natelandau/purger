@@ -26,7 +26,7 @@ from purger.plugin import Action, Plugin, Tier
 PLUGIN = Plugin(
     name={name!r},
     description="d",
-    actions=(Action(name="a", tier=Tier.SAFE, command=("true",)),),
+    actions=(Action(name="a", tier=Tier.SAFE, help="Remove a.", command=("true",)),),
 )
 """
 
