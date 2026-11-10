@@ -16,6 +16,7 @@ from purger.sizing import (
     measure_footprint,
     measure_plugin,
     parse_human_size,
+    printed_dir_usage,
 )
 from tests.conftest import make_action, make_plugin
 
@@ -521,3 +522,67 @@ def test_measure_action_absolute_paths_without_home(tmp_path: Path, mocker: Mock
     # Then the match is kept and sized
     assert report.resolved_paths == [tmp_path / "file"]
     assert report.size_bytes == disk_usage([tmp_path / "file"])
+
+
+def test_measure_plugin_size_hook_footprint() -> None:
+    """Verify a plugin size hook defines the footprint ahead of size_cmd."""
+    # Given a plugin with both a size hook and a size command
+    plugin = make_plugin(size=lambda: 42, size_cmd=("echo", "100"))
+
+    # When / Then the hook wins
+    assert measure_plugin(plugin, include_dangerous=False).footprint_bytes == 42
+
+
+def test_measure_plugin_raising_size_hook_is_unknown() -> None:
+    """Verify a plugin size hook that raises gives an unknown footprint."""
+
+    # Given
+    def boom() -> int:
+        msg = "no cache dir"
+        raise RuntimeError(msg)
+
+    plugin = make_plugin(size=boom, actions=(make_action(size=lambda: 5),))
+
+    # When / Then
+    assert measure_plugin(plugin, include_dangerous=False).footprint_bytes is None
+
+
+def test_printed_dir_usage_measures_whole_directory(tmp_path: Path) -> None:
+    """Verify the printed directory is measured when no patterns are given."""
+    # Given a tool that prints a cache directory holding a file
+    (tmp_path / "f").write_bytes(b"x" * 10_000)
+
+    # When
+    size = printed_dir_usage(f"\n{tmp_path}\n")
+
+    # Then
+    assert size == disk_usage([tmp_path])
+
+
+def test_printed_dir_usage_measures_only_patterns(tmp_path: Path) -> None:
+    """Verify patterns narrow the measurement to matching entries."""
+    # Given a cache with a matching and a non-matching subdirectory
+    (tmp_path / "ab").mkdir()
+    (tmp_path / "ab" / "f").write_bytes(b"x" * 10_000)
+    (tmp_path / "fuzz").mkdir()
+    (tmp_path / "fuzz" / "f").write_bytes(b"x" * 50_000)
+
+    # When
+    size = printed_dir_usage(str(tmp_path), patterns=("[0-9a-f][0-9a-f]",))
+
+    # Then
+    assert size == disk_usage([tmp_path / "ab"])
+
+
+def test_printed_dir_usage_missing_directory_is_zero(tmp_path: Path) -> None:
+    """Verify a printed directory that does not exist yet measures zero."""
+    # Given / When / Then
+    assert printed_dir_usage(str(tmp_path / "missing")) == 0
+
+
+@pytest.mark.parametrize("output", ["", "off", "relative/dir"])
+def test_printed_dir_usage_rejects_non_absolute_output(output: str) -> None:
+    """Verify output that does not name an absolute directory is an error, so the size is unknown."""
+    # Given / When / Then
+    with pytest.raises(ValueError, match="absolute directory"):
+        printed_dir_usage(output)

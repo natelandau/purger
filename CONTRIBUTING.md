@@ -76,12 +76,13 @@ Each plugin is one Python file in `src/purger/plugins/`. The file defines a modu
 To add a plugin, do these steps:
 
 1. Copy a plugin that is similar to the one you need. `uv.py` runs tool commands. `xcode.py` deletes directories by path.
-2. Give the plugin and each action a lowercase name with hyphens. The file name must match the plugin name.
+2. Give the plugin and each action a lowercase name with hyphens. The file name must match the plugin name, with underscores for hyphens (`pre_commit.py` for `pre-commit`).
 3. Give each action a tier. Use `safe` only when the tool rebuilds the cache cheaply and automatically.
 4. Write a `help` text for each action that tells the user what a rebuild costs.
-5. If the plugin has two or more command actions, give the plugin its own `size_cmd` or `paths`. Their sizes overlap, so purger cannot add them together.
-6. In `tests/unit/test_plugin_definitions.py`, add the plugin name to `test_discover_plugins_finds_v1_set` and add each action to `_EXPECTED_ACTIONS`.
-7. Run `uv run purger info` and `uv run purger --help` to make sure that the plugin appears.
+5. If the plugin has two or more command actions, give the plugin its own `size`, `size_cmd`, or `paths`. Their sizes can overlap, so purger cannot add them together. The exception is a plugin where each command action measures exactly what it frees, such as `go`.
+6. When a tool prints its cache directory (`npm config get cache`, `go env GOCACHE`), use that command as the `size_cmd` with `printed_dir_usage` as the parser, so purger measures the directory the tool really uses.
+7. In `tests/unit/test_plugin_definitions.py`, add the plugin name to `test_discover_plugins_finds_builtin_set` and add each action to `_EXPECTED_ACTIONS`.
+8. Run `uv run purger info` and `uv run purger --help` to make sure that the plugin appears.
 
 A plugin must not delete anything that the user cannot rebuild, unless the action has the `dangerous` tier. A path action can delete only below your home directory. purger refuses every other path.
 

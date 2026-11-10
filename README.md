@@ -9,12 +9,19 @@ Without `--dangerous` and your explicit confirmation, purger never deletes your 
 purger runs on macOS and Linux. Each supported tool is a plugin, and each plugin has one or more cleanup actions.
 
 - `apt` (Linux): downloaded package files. Both actions run with sudo.
-- `brew` (macOS, Linux): old formula versions and the download cache.
+- `brew` (macOS, Linux): old formula versions, the download cache, and dependencies that nothing needs anymore.
 - `docker` (macOS, Linux): the build cache, unused images, stopped containers, unused networks, and unused volumes.
+- `go` (macOS, Linux): the build cache and the module download cache.
+- `macports` (macOS): build files, source archives, and inactive ports. Both actions run with sudo.
+- `mise` (macOS, Linux): stale cache files and unused tool versions, or the entire cache with `--dangerous`.
+- `npm` (macOS, Linux): unneeded cache data and the npx cache, or the entire cache with `--dangerous`.
+- `pip` (macOS, Linux): the download and wheel cache, even when pip is no longer installed.
+- `pnpm` (macOS, Linux): store packages that no project uses.
+- `pre-commit` (macOS, Linux): unused hook repos, or the entire cache with `--dangerous`.
 - `prek` (macOS, Linux): unused hook environments, or the entire cache with `--dangerous`.
 - `uv` (macOS, Linux): unused cache entries, or the entire cache with `--dangerous`.
 - `xcode` (macOS): build products, device debug symbols, and app archives.
-- And more ...
+- `yarn` (macOS, Linux): the global package cache, even when yarn is no longer installed.
 
 purger skips a plugin when its tool is not installed, is not running, or does not apply to your platform. Run `purger --help` to see every action with its risk tier.
 
@@ -34,7 +41,7 @@ To install purger with pip, run this command:
 pip install purger
 ```
 
-Run purger as your normal user. purger refuses to run as root. It asks for sudo only for the actions that need it, such as the `apt` actions.
+Run purger as your normal user. purger refuses to run as root. It asks for sudo only for the actions that need it, such as the `apt` and `macports` actions.
 
 ## Quick start
 

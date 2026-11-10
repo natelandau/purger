@@ -1,12 +1,15 @@
 """Tests for plugin size-parsing and availability hooks."""
 
+from pathlib import Path
+from types import ModuleType
+
 import pytest
 from nclutils.sh import CompletedCommand, ShellCommandNotFoundError
 from pytest_mock import MockerFixture
 
-from purger.plugins import docker
+from purger.plugins import brew, docker, mise, pip, pre_commit, yarn
 from purger.plugins.brew import _parse_dry_run
-from purger.sizing import measure_plugin
+from purger.sizing import disk_usage, measure_plugin
 
 _DF_OUTPUT = (
     '{"Reclaimable":"1MB (50%)","Type":"Images"}\n'
@@ -18,7 +21,7 @@ _DF_OUTPUT = (
 
 def _completed(*, returncode: int = 0, stdout: str = "") -> CompletedCommand:
     return CompletedCommand(
-        argv=("docker",), returncode=returncode, stdout=stdout, stderr="", duration=0.0, cwd=None
+        argv=("tool",), returncode=returncode, stdout=stdout, stderr="", duration=0.0, cwd=None
     )
 
 
@@ -116,3 +119,118 @@ def test_docker_is_available_true_when_daemon_up(mocker: MockerFixture) -> None:
 
     # When / Then
     assert docker._is_available() is True
+
+
+def test_brew_autoremove_names_strip_header_and_tap() -> None:
+    """Verify the autoremove dry run yields Cellar names, without the header or tap prefix."""
+    # Given
+    output = "==> Would autoremove 2 unneeded formulae:\nlibfoo\nuser/tap/bar\n"
+
+    # When / Then
+    assert brew._autoremove_names(output) == ["libfoo", "bar"]
+
+
+def test_brew_autoremove_size_measures_cellar_racks(tmp_path: Path, mocker: MockerFixture) -> None:
+    """Verify the autoremove size sums only the racks of formulae it would remove."""
+    # Given a Cellar with one removable and one kept formula
+    (tmp_path / "libfoo" / "1.0").mkdir(parents=True)
+    (tmp_path / "libfoo" / "1.0" / "lib").write_bytes(b"x" * 10_000)
+    (tmp_path / "kept").mkdir()
+    (tmp_path / "kept" / "big").write_bytes(b"x" * 50_000)
+    outputs = {
+        ("brew", "--cellar"): f"{tmp_path}\n",
+        ("brew", "autoremove", "--dry-run"): "==> Would autoremove 1 unneeded formula:\nlibfoo\n",
+    }
+    mocker.patch(
+        "purger.plugins.brew.run_command",
+        autospec=True,
+        side_effect=lambda argv, **_: _completed(stdout=outputs[tuple(argv)]),
+    )
+
+    # When
+    size = brew._autoremove_size()
+
+    # Then
+    assert size == disk_usage([tmp_path / "libfoo"])
+
+
+def test_brew_autoremove_size_zero_when_nothing_removable(
+    tmp_path: Path, mocker: MockerFixture
+) -> None:
+    """Verify an empty dry run measures zero, since brew prints nothing then."""
+    # Given
+    mocker.patch(
+        "purger.plugins.brew.run_command",
+        autospec=True,
+        side_effect=lambda argv, **_: _completed(
+            stdout=f"{tmp_path}\n" if "--cellar" in argv else ""
+        ),
+    )
+
+    # When / Then
+    assert brew._autoremove_size() == 0
+
+
+def test_mise_prunable_install_paths() -> None:
+    """Verify every prunable version's install path is read from the JSON."""
+    # Given
+    output = (
+        '{"node": [{"version": "20.0.0", "install_path": "/m/node/20.0.0"},'
+        ' {"version": "21.0.0", "install_path": "/m/node/21.0.0"}],'
+        ' "go": [{"version": "1.0"}]}'
+    )
+
+    # When / Then
+    assert mise._prunable_install_paths(output) == [
+        Path("/m/node/20.0.0"),
+        Path("/m/node/21.0.0"),
+    ]
+
+
+def test_mise_prunable_install_paths_empty() -> None:
+    """Verify nothing prunable measures nothing."""
+    # Given / When / Then
+    assert mise._prunable_install_paths("{}") == []
+
+
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        ({"PRE_COMMIT_HOME": "/pch"}, Path("/pch")),
+        ({"XDG_CACHE_HOME": "/xdg"}, Path("/xdg/pre-commit")),
+        ({}, Path("/home/me/.cache/pre-commit")),
+    ],
+)
+def test_pre_commit_cache_dir_lookup_order(
+    env: dict[str, str], expected: Path, monkeypatch: pytest.MonkeyPatch, mocker: MockerFixture
+) -> None:
+    """Verify the cache directory follows pre-commit's own lookup order."""
+    # Given
+    monkeypatch.delenv("PRE_COMMIT_HOME", raising=False)
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    mocker.patch("purger.plugins.pre_commit.invoking_home", return_value=Path("/home/me"))
+
+    # When / Then
+    assert pre_commit._cache_dir() == expected
+
+
+@pytest.mark.parametrize("module", [pip, yarn], ids=["pip", "yarn"])
+def test_path_cache_plugins_available_only_with_a_cache(
+    module: ModuleType, tmp_path: Path, mocker: MockerFixture
+) -> None:
+    """Verify path-only plugins apply only when a cache holds something, without the tool installed."""
+    # Given an empty home
+    mocker.patch("purger.sizing.invoking_home", return_value=tmp_path)
+    assert module.PLUGIN.is_available is not None
+    before = module.PLUGIN.is_available()
+
+    # When a Linux-style cache entry appears
+    entry = tmp_path / ".cache" / module.PLUGIN.name / "entry"
+    entry.parent.mkdir(parents=True)
+    entry.write_bytes(b"x")
+
+    # Then
+    assert before is False
+    assert module.PLUGIN.is_available() is True
