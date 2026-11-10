@@ -24,6 +24,8 @@ class Action:
     Declaring actions as data lets the CLI size, confirm, and run every
     plugin the same way. When both `command` and `paths` are set, only the
     command runs and the paths are used to size and list what it removes.
+    Set `paths` to a function when the globs depend on what is on disk, so
+    they are worked out each time the action is measured rather than at import.
     Set `outside_footprint` when the plugin's own footprint does not cover this
     action's data, so its size is added to the footprint whenever the action is
     measured. Set `explain_failure` to turn a failed command's stderr into a
@@ -38,7 +40,7 @@ class Action:
     tier: Tier
     help: str
     command: tuple[str, ...] | None = None
-    paths: tuple[str, ...] = ()
+    paths: tuple[str, ...] | Callable[[], tuple[str, ...]] = ()
     size_cmd: tuple[str, ...] | None = None
     parse_size: Callable[[str], int] | None = None
     size: Callable[[], int | None] | None = None

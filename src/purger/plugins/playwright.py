@@ -53,15 +53,21 @@ def _old_builds(builds: list[Path]) -> list[Path]:
     return sorted(old)
 
 
-_REGISTRY = _registry_dir(sys.platform)
-_OLD_BUILDS = tuple(
-    glob.escape(str(path)) for path in _old_builds(expand_paths((f"{_REGISTRY}/*",)))
-)
+def _old_build_paths() -> tuple[str, ...]:
+    """List the old browser builds now in the cache, as globs that match only themselves.
+
+    Returns:
+        tuple[str, ...]: One escaped path per old build.
+    """
+    registry = _registry_dir(sys.platform)
+    builds = expand_paths((f"{registry}/*",))
+    return tuple(glob.escape(str(path)) for path in _old_builds(builds))
+
 
 PLUGIN = Plugin(
     name="playwright",
     description="Playwright browser builds",
-    is_available=lambda: bool(_OLD_BUILDS),
+    is_available=lambda: bool(_old_build_paths()),
     actions=(
         Action(
             name="old-browsers",
@@ -70,7 +76,7 @@ PLUGIN = Plugin(
                 "Remove each browser build older than the newest one. A project pinned "
                 "to an older Playwright needs `playwright install` before its next run."
             ),
-            paths=_OLD_BUILDS,
+            paths=_old_build_paths,
         ),
     ),
 )

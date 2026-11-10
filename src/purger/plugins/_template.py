@@ -89,7 +89,9 @@ PLUGIN = Plugin(
             help="Remove the tool's logs. Past runs can no longer be debugged.",
             # Without a command, purger deletes the matches itself, and only
             # below the home directory. With a command, the paths only size and
-            # list what the command removes.
+            # list what the command removes. When the globs depend on what is
+            # on disk, pass a function that returns them; it runs each time the
+            # action is measured. Never scan the disk at import.
             paths=("~/.local/state/example-tool/logs/*",),
             # The plugin's footprint does not cover this data, so this action's
             # size is added to it.

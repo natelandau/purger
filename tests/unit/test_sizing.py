@@ -189,6 +189,47 @@ def test_measure_action_paths(tmp_path: Path) -> None:
     assert report.size_bytes >= 20_000
 
 
+def test_measure_action_calls_paths_function_at_measure_time(tmp_path: Path) -> None:
+    """Verify a paths function runs when the action is measured, not when it is declared."""
+    # Given a paths function declared before its files exist
+    action = make_action(command=None, paths=lambda: (str(tmp_path / "*"),))
+    (tmp_path / "a").write_bytes(b"x" * 10_000)
+
+    # When measured
+    report = measure_action(action)
+
+    # Then the files created after the declaration are found
+    assert report.resolved_paths == [tmp_path / "a"]
+    assert report.size_bytes is not None
+    assert report.size_bytes >= 10_000
+
+
+def test_measure_action_paths_function_returning_nothing_is_empty() -> None:
+    """Verify a paths function with nothing to list sizes the action as empty."""
+    # Given / When
+    report = measure_action(make_action(command=None, paths=lambda: ()))
+
+    # Then
+    assert report.resolved_paths == []
+    assert report.size_bytes == 0
+
+
+def test_measure_action_failing_paths_function_is_unknown() -> None:
+    """Verify a paths function that raises leaves no paths and an unknown size."""
+
+    # Given
+    def failing_paths() -> tuple[str, ...]:
+        msg = "boom"
+        raise RuntimeError(msg)
+
+    # When
+    report = measure_action(make_action(command=None, paths=failing_paths))
+
+    # Then
+    assert report.resolved_paths == []
+    assert report.size_bytes is None
+
+
 def test_measure_action_command_without_size_is_unknown() -> None:
     """Verify a bare command action has unknown size."""
     # Given a command-only action / When measured / Then None

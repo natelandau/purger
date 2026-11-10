@@ -252,7 +252,8 @@ def measure_action(action: Action, *, size_outputs: _SizeOutputs | None = None) 
     Returns:
         ActionReport: The size in bytes (None when unknown) and the resolved paths.
     """
-    resolved = _deletable_matches(expand_paths(action.paths)) if action.paths else []
+    patterns = _path_patterns(action)
+    resolved = _deletable_matches(expand_paths(patterns)) if patterns else []
     size: int | None = None
     if action.size is not None:
         size = _guarded(label=action.name, size_fn=action.size)
@@ -263,9 +264,24 @@ def measure_action(action: Action, *, size_outputs: _SizeOutputs | None = None) 
             parser=action.parse_size,
             outputs={} if size_outputs is None else size_outputs,
         )
-    elif action.paths:
+    elif patterns is not None and action.paths:
         size = disk_usage(resolved)
     return ActionReport(action=action, size_bytes=size, resolved_paths=resolved)
+
+
+def _path_patterns(action: Action) -> tuple[str, ...] | None:
+    """Return the action's path globs, calling its paths function when it has one.
+
+    Returns:
+        tuple[str, ...] | None: The globs, or None when the paths function fails.
+    """
+    if isinstance(action.paths, tuple):
+        return action.paths
+    try:
+        return tuple(action.paths())
+    except Exception as exc:  # noqa: BLE001 - plugin-supplied code can raise anything
+        logger.debug("cannot list paths for %s: %s", action.name, exc)
+        return None
 
 
 def _included_actions(plugin: Plugin, *, include_dangerous: bool) -> list[Action]:

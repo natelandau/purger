@@ -1,6 +1,7 @@
 """Tests for plugin size-parsing and availability hooks."""
 
 import json
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
@@ -396,7 +397,8 @@ def test_apt_footprint_matches_clean(tmp_path: Path, mocker: MockerFixture) -> N
     (archives / "pkg.deb").write_bytes(b"x" * 10_000)
     (archives / "lock").write_bytes(b"x" * 100)
 
-    def moved(paths: tuple[str, ...]) -> tuple[str, ...]:
+    def moved(paths: tuple[str, ...] | Callable[[], tuple[str, ...]]) -> tuple[str, ...]:
+        assert isinstance(paths, tuple)
         return tuple(path.replace("/var/cache/apt/archives", str(archives)) for path in paths)
 
     plugin = replace(
@@ -883,6 +885,7 @@ def test_thumbnails_clean_each_size_folder() -> None:
     action = thumbnails.PLUGIN.actions[0]
 
     # When / Then
+    assert isinstance(action.paths, tuple)
     assert len(action.paths) == 1
     assert action.paths[0].endswith("/thumbnails/*")
 
@@ -938,6 +941,38 @@ def test_playwright_old_builds_keep_the_newest_of_each_browser(tmp_path: Path) -
         "chromium_headless_shell-1228",
         "webkit-2370",
     ]
+
+
+def test_playwright_without_old_builds_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Verify an empty browser cache leaves the plugin unavailable instead of failing."""
+    # Given a browser cache holding only the newest build
+    (tmp_path / "chromium-1254").mkdir()
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path))
+
+    # When / Then
+    assert playwright.PLUGIN.is_available is not None
+    assert not playwright.PLUGIN.is_available()
+
+
+def test_playwright_finds_old_builds_when_measured(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Verify the old builds come from the cache as it is when measured, not at import."""
+    # Given a browser cache that gains an old build after import
+    for name in ("chromium-1228", "chromium-1254"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "bin").write_bytes(b"x" * 10_000)
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path))
+    assert playwright.PLUGIN.is_available is not None
+
+    # When
+    report = measure_plugin(playwright.PLUGIN, include_dangerous=False)
+
+    # Then
+    assert playwright.PLUGIN.is_available()
+    assert report.actions[0].resolved_paths == [tmp_path / "chromium-1228"]
 
 
 @pytest.mark.parametrize(
