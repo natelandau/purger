@@ -266,10 +266,11 @@ def test_brew_footprint_counts_versions_both_actions_remove_once(
     # When
     report = measure_plugin(brew.PLUGIN, include_dangerous=False)
 
-    # Then the footprint is cleanup's total plus only the version cleanup leaves
-    assert report.footprint_bytes == 1024 + disk_usage([current])
+    # Then the footprint is cleanup's total plus the formula folder, less the old version
+    rack = old.parent
+    assert report.footprint_bytes == 1024 + disk_usage([rack]) - disk_usage([old])
     sizes = {r.action.name: r.size_bytes for r in report.actions}
-    assert sizes == {"cleanup": 1024, "autoremove": disk_usage([old, current])}
+    assert sizes == {"cleanup": 1024, "autoremove": disk_usage([rack])}
 
 
 def test_brew_footprint_falls_back_to_cleanup_when_autoremove_fails(
