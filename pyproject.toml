@@ -11,7 +11,12 @@
         "Topic :: System :: Filesystems",
         "Topic :: Utilities",
     ]
-    dependencies = ["cyclopts>=5.4.0,<6", "nclutils>=4.0.0,<5.0.0", "rich>=15.0.0,<16"]
+    dependencies = [
+        "cyclopts>=5.4.0,<6",
+        "nclutils>=4.0.0,<5.0.0",
+        "psutil>=7.0.0,<8",
+        "rich>=15.0.0,<16",
+    ]
     description = "Find and clean rebuildable developer caches to free disk space."
     keywords = ["cache", "cleanup", "cli", "disk-space", "docker", "homebrew", "uv", "xcode"]
     license = "MIT"
@@ -54,6 +59,7 @@
         "ruff>=0.17.4",
         "shellcheck-py>=0.11.0.1",
         "ty>=0.0.100",
+        "types-psutil>=7.2.2.20260906",
         "typos>=1.52.0",
         "yamllint>=1.38.0",
     ]
