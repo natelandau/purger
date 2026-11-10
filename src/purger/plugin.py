@@ -62,7 +62,9 @@ class Plugin:
     """A named group of cleanup actions for one tool or ecosystem.
 
     Grouping actions under a plugin lets users target a whole tool at once
-    and lets purger skip plugins that do not apply to the host.
+    and lets purger skip plugins that do not apply to the host. A plugin
+    sizes itself with the first of `size`, `size_cmd`, or `paths` that is
+    set; with none, its footprint is the sum of its actions' sizes.
 
     Raises:
         ValueError: If the name is not kebab-case, there are no actions,
@@ -77,6 +79,7 @@ class Plugin:
     paths: tuple[str, ...] = ()
     size_cmd: tuple[str, ...] | None = None
     parse_size: Callable[[str], int] | None = None
+    size: Callable[[], int | None] | None = None
     is_available: Callable[[], bool] | None = None
 
     def __post_init__(self) -> None:
@@ -99,4 +102,4 @@ class Plugin:
     @property
     def has_own_footprint(self) -> bool:
         """Report whether the plugin sizes itself rather than summing its actions."""
-        return self.size_cmd is not None or bool(self.paths)
+        return self.size is not None or self.size_cmd is not None or bool(self.paths)

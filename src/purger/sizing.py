@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 _SIZE_PATTERN = re.compile(r"^\s*([0-9]*\.?[0-9]+)\s*([a-zA-Z]*)\s*$")
 _GLOB_CHARS = frozenset("*?[")
 _BLOCK_BYTES = 512
-_SIZE_CMD_TIMEOUT_SECONDS = 120
+SIZE_CMD_TIMEOUT_SECONDS = 120
 
 # Size command outputs keyed by command, with None for a command that failed.
 type _SizeOutputs = dict[tuple[str, ...], str | None]
@@ -146,6 +146,34 @@ def disk_usage(paths: Iterable[Path]) -> int:
     return total
 
 
+def printed_dir_usage(output: str, patterns: Sequence[str] = ()) -> int:
+    """Measure the directory a tool prints, such as `npm config get cache`.
+
+    Use it as a `parse_size` hook, so a plugin sizes the directory the tool
+    actually uses rather than a guessed default location.
+
+    Args:
+        output: Tool output whose first non-blank line is an absolute directory.
+        patterns: Globs relative to that directory. Empty measures the whole directory.
+
+    Returns:
+        int: Allocated bytes, or 0 when the directory does not exist.
+
+    Raises:
+        ValueError: If the output does not name an absolute path.
+    """
+    line = next((line.strip() for line in output.splitlines() if line.strip()), "")
+    directory = Path(line)
+    if not directory.is_absolute():
+        msg = f"expected an absolute directory, got {line!r}"
+        raise ValueError(msg)
+    # The tool cleans the real directory, so measure it even when the printed one is a symlink.
+    directory = directory.resolve()
+    if not patterns:
+        return disk_usage([directory])
+    return disk_usage(match for pattern in patterns for match in directory.glob(pattern))
+
+
 def _parse_int(text: str) -> int:
     return int(text.strip())
 
@@ -171,7 +199,7 @@ def _guarded(label: str, size_fn: Callable[[], int | None]) -> int | None:
 def _size_cmd_output(label: str, cmd: tuple[str, ...]) -> str | None:
     """Run a size command and return its output, or None when it fails."""
     try:
-        return run_command(list(cmd), timeout=_SIZE_CMD_TIMEOUT_SECONDS).stdout
+        return run_command(list(cmd), timeout=SIZE_CMD_TIMEOUT_SECONDS).stdout
     except ShellCommandError as exc:
         logger.debug("size command for %s failed: %s", label, exc)
     except UnicodeDecodeError as exc:
@@ -248,7 +276,9 @@ def _footprint(plugin: Plugin, reports: list[ActionReport], outputs: _SizeOutput
     """Combine the plugin's own size, or else its action sizes, into one footprint."""
     if not plugin.has_own_footprint:
         return sum_known(r.size_bytes for r in reports)
-    if plugin.size_cmd is not None:
+    if plugin.size is not None:
+        own = _guarded(label=plugin.name, size_fn=plugin.size)
+    elif plugin.size_cmd is not None:
         own = _run_size_cmd(
             label=plugin.name, cmd=plugin.size_cmd, parser=plugin.parse_size, outputs=outputs
         )

@@ -72,10 +72,15 @@ def test_plugin_rejects_unknown_platform() -> None:
 
 @pytest.mark.parametrize(
     ("overrides", "expected"),
-    [({}, False), ({"paths": ("~/x",)}, True), ({"size_cmd": ("echo", "1")}, True)],
+    [
+        ({}, False),
+        ({"paths": ("~/x",)}, True),
+        ({"size_cmd": ("echo", "1")}, True),
+        ({"size": lambda: 1}, True),
+    ],
 )
 def test_plugin_has_own_footprint(overrides: dict[str, object], expected: bool) -> None:
-    """Verify has_own_footprint reflects paths or size_cmd."""
+    """Verify has_own_footprint reflects a size hook, size_cmd, or paths."""
     # Given / When
     plugin = make_plugin(**overrides)
 

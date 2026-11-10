@@ -12,13 +12,28 @@ from purger.registry import discover_plugins
 _PLUGINS = list(discover_plugins().values())
 
 
-def test_discover_plugins_finds_v1_set() -> None:
-    """Verify the built-in plugin set is exactly the v1 plugins."""
+def test_discover_plugins_finds_builtin_set() -> None:
+    """Verify the built-in plugin set is exactly the reviewed plugins."""
     # Given / When
     names = set(discover_plugins())
 
     # Then
-    assert names == {"apt", "brew", "docker", "prek", "uv", "xcode"}
+    assert names == {
+        "apt",
+        "brew",
+        "docker",
+        "go",
+        "macports",
+        "mise",
+        "npm",
+        "pip",
+        "pnpm",
+        "pre-commit",
+        "prek",
+        "uv",
+        "xcode",
+        "yarn",
+    }
 
 
 _MODULE_NAMES = sorted(m.name for m in pkgutil.iter_modules(purger.plugins.__path__))
@@ -26,7 +41,7 @@ _MODULE_NAMES = sorted(m.name for m in pkgutil.iter_modules(purger.plugins.__pat
 
 @pytest.mark.parametrize("module_name", _MODULE_NAMES)
 def test_plugin_name_matches_module(module_name: str) -> None:
-    """Verify each plugin module defines a plugin named after the module."""
+    """Verify each plugin module defines a plugin named after the module, with hyphens for underscores."""
     # Given
     module = importlib.import_module(f"purger.plugins.{module_name}")
 
@@ -34,20 +49,25 @@ def test_plugin_name_matches_module(module_name: str) -> None:
     plugin = module.PLUGIN
 
     # Then
-    assert plugin.name == module_name
+    assert plugin.name == module_name.replace("_", "-")
 
 
 @pytest.mark.parametrize("plugin", _PLUGINS, ids=lambda p: p.name)
 def test_plugin_multiple_commands_declare_footprint(plugin: Plugin) -> None:
-    """Verify plugins with two or more command actions size themselves."""
+    """Verify plugins with two or more command actions size themselves.
+
+    Summing action sizes is safe only when every command action measures exactly
+    what it frees, so a plugin is exempt only when each one has its own size.
+    """
     # Given
     actions = plugin.actions
 
     # When
     command_actions = [a for a in actions if a.command is not None]
+    all_sized = all(a.size is not None or a.size_cmd is not None for a in command_actions)
 
     # Then
-    if len(command_actions) >= 2:
+    if len(command_actions) >= 2 and not all_sized:
         assert plugin.has_own_footprint
 
 
@@ -75,9 +95,29 @@ _EXPECTED_ACTIONS: list[tuple[str, str, Tier, tuple[str, ...] | None]] = [
     ("apt", "autoclean", Tier.SAFE, ("apt-get", "autoclean")),
     ("apt", "clean", Tier.SAFE, ("apt-get", "clean")),
     ("brew", "cleanup", Tier.SAFE, ("brew", "cleanup", "--prune=all")),
+    ("brew", "autoremove", Tier.CAUTION, ("brew", "autoremove")),
     ("docker", "builder", Tier.SAFE, ("docker", "builder", "prune", "--all", "--force")),
     ("docker", "system", Tier.CAUTION, ("docker", "system", "prune", "--all", "--force")),
     ("docker", "volumes", Tier.DANGEROUS, ("docker", "volume", "prune", "--all", "--force")),
+    ("go", "build-cache", Tier.SAFE, ("go", "clean", "-cache")),
+    ("go", "modcache", Tier.CAUTION, ("go", "clean", "-modcache")),
+    (
+        "macports",
+        "clean",
+        Tier.SAFE,
+        ("/opt/local/bin/port", "-N", "clean", "--all", "installed"),
+    ),
+    ("macports", "reclaim", Tier.CAUTION, ("/opt/local/bin/port", "-N", "reclaim")),
+    ("mise", "cache-prune", Tier.SAFE, ("mise", "cache", "prune")),
+    ("mise", "prune", Tier.CAUTION, ("mise", "prune", "--yes")),
+    ("mise", "cache-clear", Tier.DANGEROUS, ("mise", "cache", "clear")),
+    ("npm", "verify", Tier.SAFE, ("npm", "cache", "verify")),
+    ("npm", "npx", Tier.SAFE, ("npm", "cache", "npx", "rm", "--force")),
+    ("npm", "clean", Tier.DANGEROUS, ("npm", "cache", "clean", "--force")),
+    ("pip", "cache", Tier.CAUTION, None),
+    ("pnpm", "prune", Tier.SAFE, ("pnpm", "store", "prune")),
+    ("pre-commit", "gc", Tier.SAFE, ("pre-commit", "gc")),
+    ("pre-commit", "clean", Tier.DANGEROUS, ("pre-commit", "clean")),
     ("prek", "gc", Tier.SAFE, ("prek", "cache", "gc")),
     ("prek", "clean", Tier.DANGEROUS, ("prek", "cache", "clean")),
     ("uv", "prune", Tier.SAFE, ("uv", "cache", "prune")),
@@ -85,6 +125,7 @@ _EXPECTED_ACTIONS: list[tuple[str, str, Tier, tuple[str, ...] | None]] = [
     ("xcode", "derived-data", Tier.SAFE, None),
     ("xcode", "device-support", Tier.CAUTION, None),
     ("xcode", "archives", Tier.DANGEROUS, None),
+    ("yarn", "cache", Tier.CAUTION, None),
 ]
 
 
@@ -130,3 +171,30 @@ def test_docker_volumes_count_outside_footprint() -> None:
 
     # Then
     assert flags == {"builder": False, "system": False, "volumes": True}
+
+
+@pytest.mark.parametrize(
+    ("plugin_name", "action_name"), [("brew", "autoremove"), ("macports", "reclaim")]
+)
+def test_uninstalling_actions_need_confirmation(plugin_name: str, action_name: str) -> None:
+    """Verify actions that uninstall packages are never in the safe tier."""
+    # Given
+    plugin = discover_plugins()[plugin_name]
+
+    # When
+    action = next(a for a in plugin.actions if a.name == action_name)
+
+    # Then
+    assert action.tier is not Tier.SAFE
+
+
+def test_mise_prune_counts_outside_footprint() -> None:
+    """Verify pruned tool versions add to the footprint, since the mise cache excludes them."""
+    # Given
+    plugin = discover_plugins()["mise"]
+
+    # When
+    flags = {a.name: a.outside_footprint for a in plugin.actions}
+
+    # Then
+    assert flags == {"cache-prune": False, "prune": True, "cache-clear": False}
