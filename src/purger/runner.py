@@ -19,6 +19,15 @@ logger = logging.getLogger(__name__)
 _SUDO_PROBE_TIMEOUT_SECONDS = 10
 
 
+def _explain(explain: Callable[[str], str | None], *, stderr: str) -> str | None:
+    """Run an action's failure hook so a broken hook drops its hint instead of the run."""
+    try:
+        return explain(stderr)
+    except Exception as exc:  # noqa: BLE001 - plugin-supplied code can raise anything
+        logger.debug("cannot explain failure: %s", exc)
+        return None
+
+
 def _describe_failure(exc: Exception, *, explain: Callable[[str], str | None] | None = None) -> str:
     """Build an error message for a failed action, adding trimmed stderr from a failed command.
 
@@ -38,7 +47,7 @@ def _describe_failure(exc: Exception, *, explain: Callable[[str], str | None] | 
         # A message nclutils builds from the result already carries stderr.
         if stderr and stderr not in message:
             message = f"{message}: {stderr}"
-        hint = explain(stderr) if explain is not None and stderr else None
+        hint = _explain(explain, stderr=stderr) if explain is not None and stderr else None
         if hint:
             message = f"{hint}\n{message}"
     return message

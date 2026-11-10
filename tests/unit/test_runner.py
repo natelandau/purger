@@ -351,6 +351,22 @@ def test_describe_keeps_message_when_explain_returns_none() -> None:
     assert message == "boom: disk full"
 
 
+def test_describe_ignores_raising_explain_hook() -> None:
+    """Verify a hook that raises drops its hint and keeps the failure message."""
+    # Given
+    exc = ShellCommandFailedError(result=_completed(stderr="disk full"), msg="boom")
+
+    def explain(_stderr: str) -> str:
+        msg = "broken hook"
+        raise RuntimeError(msg)
+
+    # When
+    message = _describe_failure(exc, explain=explain)
+
+    # Then
+    assert message == "boom: disk full"
+
+
 def test_run_action_failure_uses_action_explain_hook(mocker: MockerFixture) -> None:
     """Verify a failed command's report carries the hint from the action's hook."""
     # Given
