@@ -6,7 +6,7 @@
         "Programming Language :: Python :: 3.15",
     ]
     dependencies = [
-    "nclutils>=3.4.4,<4.0.0",
+    "nclutils>=4.0.0,<5.0.0",
     "rich>=15.0.0",
 ]
     description = "Purge application caches and free up disk space."
