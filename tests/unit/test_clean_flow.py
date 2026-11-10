@@ -404,7 +404,7 @@ def test_risky_prompt_names_tool_and_help(help_text: str) -> None:
     )
 
     # When / Then
-    assert risky_prompt("p", c) == f"p: Drops stuff (about {human_size(5)}). Continue?"
+    assert risky_prompt("p", c) == f"p (about {human_size(5)}): Drops stuff. Continue?"
 
 
 def test_risky_prompt_dangerous_sudo_wording() -> None:

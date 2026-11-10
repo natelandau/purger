@@ -1,7 +1,7 @@
 """Execute approved cleanup actions."""
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from nclutils.sh import (
@@ -19,15 +19,37 @@ logger = logging.getLogger(__name__)
 _SUDO_PROBE_TIMEOUT_SECONDS = 10
 
 
-def _describe_failure(exc: Exception) -> str:
-    """Build an error message for a failed action, adding trimmed stderr from a failed command."""
+def _explain(explain: Callable[[str], str | None], *, stderr: str) -> str | None:
+    """Run an action's failure hook so a broken hook drops its hint instead of the run."""
+    try:
+        return explain(stderr)
+    except Exception as exc:  # noqa: BLE001 - plugin-supplied code can raise anything
+        logger.debug("cannot explain failure: %s", exc)
+        return None
+
+
+def _describe_failure(exc: Exception, *, explain: Callable[[str], str | None] | None = None) -> str:
+    """Build an error message for a failed action, adding trimmed stderr from a failed command.
+
+    Args:
+        exc: The exception that failed the action.
+        explain: The action's hook that turns a failed command's stderr into a
+            hint, which leads the message so it is not lost below the tool output.
+
+    Returns:
+        str: The message to record on the action report.
+    """
     if isinstance(exc, UnicodeDecodeError):
         return f"tool output is not UTF-8: {exc}"
     message = str(exc)
     if isinstance(exc, ShellCommandFailedError) and exc.result is not None:
         stderr = exc.result.stderr.strip()
-        if stderr:
+        # A message nclutils builds from the result already carries stderr.
+        if stderr and stderr not in message:
             message = f"{message}: {stderr}"
+        hint = _explain(explain, stderr=stderr) if explain is not None and stderr else None
+        if hint:
+            message = f"{hint}\n{message}"
     return message
 
 
@@ -86,7 +108,7 @@ def run_action(report: ActionReport, *, home: Path, verbose: bool, interactive: 
     except (ShellCommandError, UnicodeDecodeError, _PathDeletionError, OSError) as exc:
         logger.debug("Action %s failed", report.action.name, exc_info=True)
         report.status = Status.FAILED
-        report.error = _describe_failure(exc)
+        report.error = _describe_failure(exc, explain=report.action.explain_failure)
     else:
         report.status = Status.DONE
         report.error = None

@@ -7,6 +7,29 @@ from purger.sizing import printed_dir_usage
 
 _CACHE_DIR_CMD = ("npm", "config", "get", "cache")
 
+
+def _explain_npx_failure(stderr: str) -> str | None:
+    """Name the usual cause when npm cannot remove the npx cache directory.
+
+    A running npx command (an MCP server or a status line, for example) can
+    reinstall a package while npm removes the cache, so the final rmdir finds
+    the directory not empty.
+
+    Args:
+        stderr: The failed npm command's stderr.
+
+    Returns:
+        str | None: A hint for ENOTEMPTY, or None for any other failure.
+    """
+    if "ENOTEMPTY" not in stderr:
+        return None
+    return (
+        "An npx command wrote to the npx cache while it was being removed. "
+        "Most of the cache is likely gone. Stop programs that run through npx, "
+        "such as MCP servers or a status line, then run this action again."
+    )
+
+
 PLUGIN = Plugin(
     name="npm",
     description="npm package cache and npx cache",
@@ -28,6 +51,7 @@ PLUGIN = Plugin(
             command=("npm", "cache", "npx", "rm", "--force"),
             size_cmd=_CACHE_DIR_CMD,
             parse_size=partial(printed_dir_usage, patterns=("_npx",)),
+            explain_failure=_explain_npx_failure,
         ),
         Action(
             name="clean",

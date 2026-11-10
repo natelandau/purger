@@ -41,8 +41,9 @@ description, largest first, and a total at the bottom. A check under `Partial
 purge` means a clean frees only part of that size, because the tool decides at
 run time what it still needs. Sizes that cannot be measured show `?` and are
 left out of the total. `dangerous` actions are left out unless you pass
-`--dangerous`, which can turn a partial purge into a full one. Plugins that do not apply here (wrong
-platform, tool not installed, or tool not running) are listed as skipped.
+`--dangerous`, which can turn a partial purge into a full one. Plugins that do
+not apply here (wrong platform, tool not installed, or tool not running) are
+listed as skipped.
 """
 
 CLEAN_HELP = """\
@@ -58,7 +59,8 @@ nothing to clean are skipped. Then it asks:
 
 Then it runs the approved actions. A failed action is reported and the run
 continues with the next one. At the end it measures again and prints a table
-of each tool's cache size before and after, and the space freed. Actions that need sudo say so before they run.
+of each tool's cache size before and after, and the space freed. Actions that
+need sudo say so before they run.
 
 Without an interactive terminal (or with `--json`), purger cannot prompt:
 `safe` actions run only with `--yes`, `caution` and `dangerous` actions are

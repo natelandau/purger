@@ -36,7 +36,9 @@ def test_discover_plugins_finds_builtin_set() -> None:
     }
 
 
-_MODULE_NAMES = sorted(m.name for m in pkgutil.iter_modules(purger.plugins.__path__))
+_MODULE_NAMES = sorted(
+    m.name for m in pkgutil.iter_modules(purger.plugins.__path__) if not m.name.startswith("_")
+)
 
 
 @pytest.mark.parametrize("module_name", _MODULE_NAMES)

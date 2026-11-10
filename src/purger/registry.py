@@ -29,7 +29,8 @@ def discover_plugins(package: ModuleType | None = None) -> dict[str, Plugin]:
     """Import every module in a package and collect its module-level PLUGIN.
 
     Discovery by import keeps plugins declarative: adding a file is the only
-    step needed to register one.
+    step needed to register one. Modules whose names start with an underscore,
+    such as the plugin template, are never imported.
 
     Args:
         package: Package to scan. Defaults to `purger.plugins`.
@@ -56,6 +57,8 @@ def _discover(package: ModuleType) -> dict[str, Plugin]:
     found: dict[str, Plugin] = {}
     defined_in: dict[str, str] = {}
     for info in pkgutil.iter_modules(package.__path__):
+        if info.name.startswith("_"):
+            continue
         module = importlib.import_module(f"{package.__name__}.{info.name}")
         plugin = getattr(module, "PLUGIN", None)
         if plugin is None:

@@ -11,6 +11,7 @@ from pytest_mock import MockerFixture
 from purger.output import is_partial
 from purger.plugins import apt, brew, docker, mise, npm, pip, pre_commit, yarn
 from purger.plugins.brew import _parse_dry_run
+from purger.plugins.npm import _explain_npx_failure
 from purger.sizing import disk_usage, measure_plugin
 
 _DF_OUTPUT = (
@@ -279,3 +280,21 @@ def test_apt_footprint_matches_clean(tmp_path: Path, mocker: MockerFixture) -> N
     # Then
     assert report.footprint_bytes == disk_usage([archives / "pkg.deb"])
     assert is_partial(report) is False
+
+
+@pytest.mark.parametrize(
+    ("stderr", "has_hint"),
+    [
+        ("npm error code ENOTEMPTY\nnpm error syscall rmdir", True),
+        ("npm error code EACCES", False),
+    ],
+)
+def test_explain_npx_failure_hints_only_on_enotempty(stderr: str, *, has_hint: bool) -> None:
+    """Verify the npx hint names a concurrent npx run only for a not-empty directory error."""
+    # Given / When
+    hint = _explain_npx_failure(stderr)
+
+    # Then
+    assert (hint is not None) is has_hint
+    if hint is not None:
+        assert "npx" in hint

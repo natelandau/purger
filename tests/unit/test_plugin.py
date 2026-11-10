@@ -12,14 +12,14 @@ def test_action_requires_command_or_paths() -> None:
     """Verify an action with neither command nor paths is rejected."""
     # Given / When / Then
     with pytest.raises(ValueError, match="command or paths"):
-        Action(name="x", tier=Tier.SAFE)
+        Action(name="x", tier=Tier.SAFE, help="h")
 
 
 def test_action_sudo_requires_command() -> None:
     """Verify needs_sudo is rejected on a paths-only action."""
     # Given / When / Then
     with pytest.raises(ValueError, match="needs_sudo"):
-        Action(name="x", tier=Tier.SAFE, paths=("~/a",), needs_sudo=True)
+        Action(name="x", tier=Tier.SAFE, help="h", paths=("~/a",), needs_sudo=True)
 
 
 @pytest.mark.parametrize("name", ["Derived_Data", "derived data", "-a", "a-", "", "abc\n"])

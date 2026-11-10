@@ -60,20 +60,21 @@ def build_package(tmp_path: Path) -> Iterator[Callable[[dict[str, str]], ModuleT
 def test_discover_collects_plugin_constants(
     build_package: Callable[[dict[str, str]], ModuleType],
 ) -> None:
-    """Verify discovery returns every module's PLUGIN keyed by name and sorted."""
-    # Given a package with two plugin modules and one without PLUGIN
+    """Verify discovery returns every public module's PLUGIN keyed by name and sorted."""
+    # Given a package with two plugin modules, one without PLUGIN, and one private
     package = build_package(
         {
             "zed": _PLUGIN_SRC.format(name="zed"),
             "alpha": _PLUGIN_SRC.format(name="alpha"),
             "helper": "X = 1\n",
+            "_private": _PLUGIN_SRC.format(name="private"),
         },
     )
 
     # When discovering
     found = discover_plugins(package)
 
-    # Then only the plugins are returned, sorted by name
+    # Then only the public plugins are returned, sorted by name
     assert list(found) == ["alpha", "zed"]
 
 

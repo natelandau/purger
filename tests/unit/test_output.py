@@ -201,6 +201,7 @@ def test_clean_document_sums_several_freed() -> None:
         (None, (None,), True),
         (None, (5,), False),
         (100, (), False),
+        (0, (None,), False),
     ],
     ids=[
         "all-known",
@@ -210,6 +211,7 @@ def test_clean_document_sums_several_freed() -> None:
         "unknown-footprint-and-action",
         "unknown-footprint-known-action",
         "no-included-actions",
+        "empty-footprint",
     ],
 )
 def test_is_partial_rules(
@@ -221,6 +223,25 @@ def test_is_partial_rules(
 
     # When / Then
     assert is_partial(report) is expected
+
+
+def test_is_partial_empty_footprint_with_unknown_outside_action() -> None:
+    """Verify a zero footprint stays partial when an outside-footprint action has no size."""
+    # Given
+    report = PluginReport(
+        plugin=make_plugin(name="t", description="t tool"),
+        footprint_bytes=0,
+        actions=[
+            ActionReport(
+                action=make_action(name="outside", outside_footprint=True),
+                size_bytes=None,
+                resolved_paths=[],
+            )
+        ],
+    )
+
+    # When / Then
+    assert is_partial(report) is True
 
 
 def test_render_table_one_row_per_tool_sorted_by_size() -> None:
