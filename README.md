@@ -8,17 +8,27 @@ Without `--dangerous` and your explicit confirmation, purger never deletes your 
 
 purger runs on macOS and Linux. Each supported tool is a plugin, and each plugin has one or more cleanup actions.
 
+- `ansible` (macOS, Linux): temp folders left by interrupted runs and the Galaxy cache, in `~/.ansible` and `$ANSIBLE_HOME`. Skipped while an ansible command runs.
 - `apt` (Linux): downloaded package files. Both actions run with sudo.
 - `brew` (macOS, Linux): old formula versions, the download cache, and dependencies that nothing needs anymore.
+- `conda` (macOS, Linux): downloaded package tarballs, packages that no environment uses, the index cache, and logs.
+- `dnf` (Linux): downloaded package files. Runs with sudo.
 - `docker` (macOS, Linux): the build cache, unused images, stopped containers, unused networks, and unused volumes.
+- `flatpak` (Linux): runtimes and extensions that no app uses, in your user installation and, with sudo, the system installation.
 - `go` (macOS, Linux): the build cache and the module download cache.
 - `macports` (macOS): build files, source archives, and inactive ports. Both actions run with sudo.
+- `maestro` (macOS, Linux): logs, screenshots, and local recordings of past `maestro test` runs. Skipped while Maestro runs.
 - `mise` (macOS, Linux): stale cache files and unused tool versions, or the entire cache with `--dangerous`.
 - `npm` (macOS, Linux): unneeded cache data and the npx cache, or the entire cache with `--dangerous`.
+- `pacman` (Linux): cached package versions beyond the newest 3, and every cached version of uninstalled packages. Needs `paccache` from pacman-contrib, and runs with sudo.
 - `pip` (macOS, Linux): the download and wheel cache, even when pip is no longer installed.
-- `pnpm` (macOS, Linux): store packages that no project uses.
+- `pnpm` (macOS, Linux): store packages that no project uses, and registry metadata in formats the installed pnpm can no longer read.
+- `podman` (macOS, Linux): unused images, stopped containers, pods, networks, and build cache, and unused volumes with `--dangerous`.
 - `pre-commit` (macOS, Linux): unused hook repos, or the entire cache with `--dangerous`.
 - `prek` (macOS, Linux): unused hook environments, or the entire cache with `--dangerous`.
+- `rip2` (macOS, Linux): the rip2 graveyard of deleted files. Runs only when `rip` on PATH is rip2.
+- `thumbnails` (Linux): the desktop file thumbnail cache.
+- `trash` (macOS, Linux): everything in the Trash in your home folder. On macOS, the terminal needs Full Disk Access.
 - `uv` (macOS, Linux): unused cache entries, or the entire cache with `--dangerous`.
 - `xcode` (macOS): build products, device debug symbols, and app archives.
 - `yarn` (macOS, Linux): the global package cache, even when yarn is no longer installed.
