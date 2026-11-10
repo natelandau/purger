@@ -1,0 +1,102 @@
+"""Data model for purger plugins and their actions."""
+
+import re
+from collections.abc import Callable
+from dataclasses import dataclass
+from enum import StrEnum
+
+_KEBAB_CASE = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")
+_PLATFORMS = frozenset({"darwin", "linux"})
+
+
+class Tier(StrEnum):
+    """Risk level of an action, which decides how much confirmation it needs."""
+
+    SAFE = "safe"
+    CAUTION = "caution"
+    DANGEROUS = "dangerous"
+
+
+@dataclass(frozen=True, kw_only=True)
+class Action:
+    """One cleanup operation, run as a command or as a set of paths to delete.
+
+    Declaring actions as data lets the CLI size, confirm, and run every
+    plugin the same way. When both `command` and `paths` are set, only the
+    command runs and the paths are used to size and list what it removes.
+    Set `outside_footprint` when the plugin's own
+    footprint does not cover this action's data, so its size is added to the
+    footprint whenever the action is measured.
+
+    Raises:
+        ValueError: If the name is not kebab-case, neither command nor paths
+            is set, or needs_sudo is set without a command.
+    """
+
+    name: str
+    tier: Tier
+    help: str = ""
+    command: tuple[str, ...] | None = None
+    paths: tuple[str, ...] = ()
+    size_cmd: tuple[str, ...] | None = None
+    parse_size: Callable[[str], int] | None = None
+    size: Callable[[], int | None] | None = None
+    needs_sudo: bool = False
+    outside_footprint: bool = False
+
+    def __post_init__(self) -> None:
+        """Validate the action's invariants."""
+        if not _KEBAB_CASE.fullmatch(self.name):
+            msg = f"action name {self.name!r} must be kebab-case"
+            raise ValueError(msg)
+        if self.command is None and not self.paths:
+            msg = f"action {self.name!r} needs a command or paths"
+            raise ValueError(msg)
+        if self.needs_sudo and self.command is None:
+            msg = f"action {self.name!r} sets needs_sudo without a command"
+            raise ValueError(msg)
+
+
+@dataclass(frozen=True, kw_only=True)
+class Plugin:
+    """A named group of cleanup actions for one tool or ecosystem.
+
+    Grouping actions under a plugin lets users target a whole tool at once
+    and lets purger skip plugins that do not apply to the host.
+
+    Raises:
+        ValueError: If the name is not kebab-case, there are no actions,
+            action names repeat, or a platform is not darwin or linux.
+    """
+
+    name: str
+    description: str
+    actions: tuple[Action, ...]
+    platforms: frozenset[str] = frozenset({"darwin", "linux"})
+    requires: str | None = None
+    paths: tuple[str, ...] = ()
+    size_cmd: tuple[str, ...] | None = None
+    parse_size: Callable[[str], int] | None = None
+    is_available: Callable[[], bool] | None = None
+
+    def __post_init__(self) -> None:
+        """Validate the plugin's invariants."""
+        if not _KEBAB_CASE.fullmatch(self.name):
+            msg = f"plugin name {self.name!r} must be kebab-case"
+            raise ValueError(msg)
+        if not self.actions:
+            msg = f"plugin {self.name!r} needs at least one action"
+            raise ValueError(msg)
+        names = [action.name for action in self.actions]
+        if len(set(names)) != len(names):
+            msg = f"plugin {self.name!r} has duplicate action names"
+            raise ValueError(msg)
+        unknown = self.platforms - _PLATFORMS
+        if unknown:
+            msg = f"plugin {self.name!r} has unknown platform(s): {sorted(unknown)}"
+            raise ValueError(msg)
+
+    @property
+    def has_own_footprint(self) -> bool:
+        """Report whether the plugin sizes itself rather than summing its actions."""
+        return self.size_cmd is not None or bool(self.paths)
