@@ -15,17 +15,22 @@ from purger.plugins import (
     ansible,
     apt,
     brew,
+    bun,
+    cocoapods,
     conda,
+    corepack,
     docker,
     maestro,
     mise,
     npm,
     pacman,
     pip,
+    playwright,
     pnpm,
     podman,
     pre_commit,
     rip2,
+    simulators,
     thumbnails,
     trash,
     yarn,
@@ -880,3 +885,201 @@ def test_thumbnails_clean_each_size_folder() -> None:
     # When / Then
     assert len(action.paths) == 1
     assert action.paths[0].endswith("/thumbnails/*")
+
+
+@pytest.mark.parametrize(
+    ("env", "platform", "expected"),
+    [
+        ({}, "darwin", "~/Library/Caches/ms-playwright"),
+        ({}, "linux", "~/.cache/ms-playwright"),
+        ({"XDG_CACHE_HOME": "/xdg"}, "linux", "/xdg/ms-playwright"),
+        ({"PLAYWRIGHT_BROWSERS_PATH": "/browsers"}, "darwin", "/browsers"),
+        ({"PLAYWRIGHT_BROWSERS_PATH": "0"}, "darwin", "~/Library/Caches/ms-playwright"),
+    ],
+)
+def test_playwright_registry_dir(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, str], platform: str, expected: str
+) -> None:
+    """Verify the browser cache follows Playwright's platform default and its overrides."""
+    # Given
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    monkeypatch.delenv("PLAYWRIGHT_BROWSERS_PATH", raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+
+    # When / Then
+    assert playwright._registry_dir(platform) == expected
+
+
+def test_playwright_old_builds_keep_the_newest_of_each_browser(tmp_path: Path) -> None:
+    """Verify only builds older than each browser's newest are picked, and other entries stay."""
+    # Given
+    names = [
+        "chromium-1228",
+        "chromium-1254",
+        "chromium-999",
+        "chromium_headless_shell-1228",
+        "chromium_headless_shell-1254",
+        "ffmpeg-1011",
+        "webkit-2370",
+        "webkit-2388",
+        ".links",
+        "notes",
+    ]
+    builds = [tmp_path / name for name in names]
+
+    # When
+    old = playwright._old_builds(builds)
+
+    # Then
+    assert [path.name for path in old] == [
+        "chromium-1228",
+        "chromium-999",
+        "chromium_headless_shell-1228",
+        "webkit-2370",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        ({}, "~/Library/Caches/CocoaPods"),
+        ({"CP_HOME_DIR": "/pods"}, "/pods/cache"),
+        ({"CP_HOME_DIR": "/pods", "CP_CACHE_DIR": "/cache"}, "/cache"),
+        ({"CP_CACHE_DIR": "relative"}, "~/Library/Caches/CocoaPods"),
+        ({"CP_HOME_DIR": "relative"}, "~/Library/Caches/CocoaPods"),
+    ],
+)
+def test_cocoapods_cache_dir(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, str], expected: str
+) -> None:
+    """Verify CP_CACHE_DIR wins over CP_HOME_DIR, which wins over the default."""
+    # Given
+    monkeypatch.delenv("CP_HOME_DIR", raising=False)
+    monkeypatch.delenv("CP_CACHE_DIR", raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+
+    # When / Then
+    assert cocoapods._cache_dir() == expected
+
+
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        ({}, "~/.cache/node/corepack"),
+        ({"XDG_CACHE_HOME": "/xdg"}, "/xdg/node/corepack"),
+        ({"XDG_CACHE_HOME": "/xdg", "COREPACK_HOME": "/cp"}, "/cp"),
+    ],
+)
+def test_corepack_home(monkeypatch: pytest.MonkeyPatch, env: dict[str, str], expected: str) -> None:
+    """Verify COREPACK_HOME wins, then XDG_CACHE_HOME, on every platform."""
+    # Given
+    monkeypatch.delenv("COREPACK_HOME", raising=False)
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+
+    # When / Then
+    assert corepack._home() == expected
+
+
+def _simctl_listing(tmp_path: Path) -> str:
+    return json.dumps(
+        {
+            "devices": {
+                "com.apple.CoreSimulator.SimRuntime.iOS-17-0": [
+                    {"isAvailable": False, "dataPath": f"{tmp_path}/OLD/data"},
+                ],
+                "com.apple.CoreSimulator.SimRuntime.iOS-27-1": [
+                    {"isAvailable": True, "dataPath": f"{tmp_path}/NEW/data"},
+                    {"isAvailable": False},
+                ],
+            }
+        }
+    )
+
+
+def test_simulators_size_counts_only_unavailable_devices(
+    tmp_path: Path, mocker: MockerFixture
+) -> None:
+    """Verify the size covers each unavailable device's folder and skips available ones."""
+    # Given
+    for device, size in (("OLD", 10_000), ("NEW", 50_000)):
+        (tmp_path / device / "data").mkdir(parents=True)
+        (tmp_path / device / "data" / "disk").write_bytes(b"x" * size)
+    mocker.patch(
+        "purger.plugins.simulators.run_command",
+        autospec=True,
+        return_value=_completed(stdout=_simctl_listing(tmp_path)),
+    )
+
+    # When
+    size = simulators._unavailable_size()
+
+    # Then
+    assert size == disk_usage([tmp_path / "OLD"])
+
+
+def test_simulators_unavailable_until_first_launch_finishes(mocker: MockerFixture) -> None:
+    """Verify simctl is never called while Xcode's first-launch setup is unfinished."""
+    # Given
+    run = mocker.patch(
+        "purger.runner.run_command",
+        autospec=True,
+        side_effect=[_completed(), _completed(returncode=1)],
+    )
+
+    # When / Then
+    assert simulators._is_available() is False
+    assert run.call_args.args[0] == ["xcodebuild", "-checkFirstLaunchStatus"]
+
+
+def test_simulators_never_run_xcodebuild_without_developer_tools(mocker: MockerFixture) -> None:
+    """Verify the xcodebuild shim, which opens an install dialog, is skipped without tools."""
+    # Given
+    run = mocker.patch(
+        "purger.runner.run_command", autospec=True, return_value=_completed(returncode=2)
+    )
+
+    # When / Then
+    assert simulators._is_available() is False
+    run.assert_called_once()
+    assert run.call_args.args[0] == ["xcode-select", "-p"]
+
+
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        ("1.4.4\n", True),
+        ("1.5.0\n", True),
+        ("2.0.0-canary.1+abc\n", True),
+        ("1.4.3\n", False),
+        ("1.3.10\n", False),
+        ("not a version\n", False),
+    ],
+)
+def test_bun_available_only_with_cache_prune(
+    mocker: MockerFixture, output: str, expected: bool
+) -> None:
+    """Verify bun before 1.4.4, whose cache prune silently does nothing, is skipped."""
+    # Given
+    mocker.patch(
+        "purger.plugins.bun.run_command", autospec=True, return_value=_completed(stdout=output)
+    )
+
+    # When / Then
+    assert bun._is_available() is expected
+
+
+def test_bun_unavailable_when_version_cannot_run(mocker: MockerFixture) -> None:
+    """Verify a bun that cannot run counts as unavailable."""
+    # Given
+    mocker.patch(
+        "purger.plugins.bun.run_command",
+        autospec=True,
+        side_effect=ShellCommandNotFoundError(argv=["bun"]),
+    )
+
+    # When / Then
+    assert bun._is_available() is False

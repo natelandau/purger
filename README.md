@@ -11,7 +11,10 @@ purger runs on macOS and Linux. Each supported tool is a plugin, and each plugin
 - `ansible` (macOS, Linux): temp folders left by interrupted runs and the Galaxy cache, in `~/.ansible` and `$ANSIBLE_HOME`. Skipped while an ansible command runs.
 - `apt` (Linux): downloaded package files. Both actions run with sudo.
 - `brew` (macOS, Linux): old formula versions, the download cache, and dependencies that nothing needs anymore.
+- `bun` (macOS, Linux): packages unused for 30 days, or the entire cache with `--dangerous`.
+- `cocoapods` (macOS): the pod download cache.
 - `conda` (macOS, Linux): downloaded package tarballs, packages that no environment uses, the index cache, and logs.
+- `corepack` (macOS, Linux): downloaded yarn, pnpm, and npm versions.
 - `dnf` (Linux): downloaded package files. Runs with sudo.
 - `docker` (macOS, Linux): the build cache, unused images, stopped containers, unused networks, and unused volumes.
 - `flatpak` (Linux): runtimes and extensions that no app uses, in your user installation and, with sudo, the system installation.
@@ -22,11 +25,14 @@ purger runs on macOS and Linux. Each supported tool is a plugin, and each plugin
 - `npm` (macOS, Linux): unneeded cache data and the npx cache, or the entire cache with `--dangerous`.
 - `pacman` (Linux): cached package versions beyond the newest 3, and every cached version of uninstalled packages. Needs `paccache` from pacman-contrib, and runs with sudo.
 - `pip` (macOS, Linux): the download and wheel cache, even when pip is no longer installed.
+- `playwright` (macOS, Linux): browser builds older than the newest of each browser.
 - `pnpm` (macOS, Linux): store packages that no project uses, and registry metadata in formats the installed pnpm can no longer read.
 - `podman` (macOS, Linux): unused images, stopped containers, pods, networks, and build cache, and unused volumes with `--dangerous`.
 - `pre-commit` (macOS, Linux): unused hook repos, or the entire cache with `--dangerous`.
 - `prek` (macOS, Linux): unused hook environments, or the entire cache with `--dangerous`.
 - `rip2` (macOS, Linux): the rip2 graveyard of deleted files. Runs only when `rip` on PATH is rip2.
+- `simulators` (macOS): simulator devices the installed Xcode cannot run.
+- `swiftpm` (macOS, Linux): cached package clones, manifests, and binary frameworks.
 - `thumbnails` (Linux): the desktop file thumbnail cache.
 - `trash` (macOS, Linux): everything in the Trash in your home folder. On macOS, the terminal needs Full Disk Access.
 - `uv` (macOS, Linux): unused cache entries, or the entire cache with `--dangerous`.
