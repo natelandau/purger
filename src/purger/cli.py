@@ -239,14 +239,11 @@ def _begin(
 
 
 def _report_skipped(skipped: list[SkippedPlugin], names: Sequence[str]) -> None:
+    """Warn about plugins the user named that cannot run here."""
     requested = set(names)
     for item in skipped:
         if item.name in requested:
             pp.warning(f"{item.name} is not available on this machine: {_reason_text(item.reason)}")
-    others = [item for item in skipped if item.name not in requested]
-    if others:
-        listing = ", ".join(f"{item.name} ({_reason_text(item.reason)})" for item in others)
-        pp.info(f"Skipped: {listing}", style="dim")
 
 
 def _print_table(reports: list[PluginReport]) -> None:

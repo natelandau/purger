@@ -43,7 +43,7 @@ run time what it still needs. Sizes that cannot be measured show `?` and are
 left out of the total. `dangerous` actions are left out unless you pass
 `--dangerous`, which can turn a partial purge into a full one. Plugins that do
 not apply here (wrong platform, tool not installed, or tool not running) are
-listed as skipped.
+not shown, unless you name one.
 """
 
 CLEAN_HELP = """\
