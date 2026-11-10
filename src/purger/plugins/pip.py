@@ -1,10 +1,25 @@
 """Plugin for the pip download and wheel cache."""
 
 from purger.plugin import Action, Plugin, Tier
+from purger.plugins._shared import env_dir
 from purger.sizing import expand_paths
 
-# Deleted by path so a cache left behind after pip itself is gone still gets cleaned.
-_CACHE_PATHS = ("~/Library/Caches/pip/*", "~/.cache/pip/*")
+
+def _cache_patterns() -> tuple[str, ...]:
+    """List the pip cache contents to delete, as glob-safe patterns.
+
+    Deleted by path so a cache left behind after pip itself is gone still gets
+    cleaned. On Linux pip follows `XDG_CACHE_HOME`, and `~/.cache/pip` is kept
+    for a cache written before the variable was set.
+
+    Returns:
+        tuple[str, ...]: Cache content patterns, without duplicates.
+    """
+    xdg_cache = env_dir("XDG_CACHE_HOME", "~/.cache")
+    return tuple(dict.fromkeys(("~/Library/Caches/pip/*", "~/.cache/pip/*", f"{xdg_cache}/pip/*")))
+
+
+_CACHE_PATHS = _cache_patterns()
 
 
 def _has_cache() -> bool:

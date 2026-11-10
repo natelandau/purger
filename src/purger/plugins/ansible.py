@@ -30,8 +30,9 @@ _ANSIBLE_EXECUTABLE = re.compile(r"ansible(-[a-z]+)?")
 def _is_ansible_command(cmdline: list[str]) -> bool:
     """Report whether a process argv runs an `ansible` or `ansible-*` command.
 
-    Only the first two arguments are checked, since a shebang launch puts the
-    interpreter first and the script second.
+    Only the executable and the first non-option argument after it are checked,
+    since a shebang launch puts the interpreter first, then any shebang flags
+    (such as `python3 -s`), then the script.
 
     Args:
         cmdline: The process argv.
@@ -39,7 +40,14 @@ def _is_ansible_command(cmdline: list[str]) -> bool:
     Returns:
         bool: True when the executable or script is an ansible command.
     """
-    return any(_ANSIBLE_EXECUTABLE.fullmatch(Path(arg).name) for arg in cmdline[:2])
+    if not cmdline:
+        return False
+    script = next((arg for arg in cmdline[1:] if not arg.startswith("-")), None)
+    return any(
+        _ANSIBLE_EXECUTABLE.fullmatch(Path(arg).name)
+        for arg in (cmdline[0], script)
+        if arg is not None
+    )
 
 
 def _is_available() -> bool:

@@ -192,6 +192,58 @@ def test_brew_autoremove_size_zero_when_nothing_removable(
     assert brew._autoremove_size() == 0
 
 
+def test_brew_footprint_counts_versions_both_actions_remove_once(
+    tmp_path: Path, mocker: MockerFixture
+) -> None:
+    """Verify an old version that cleanup and autoremove both remove is counted once."""
+    # Given a removable formula whose old version cleanup also removes
+    old = tmp_path / "libfoo" / "1.0"
+    current = tmp_path / "libfoo" / "2.0"
+    for version in (old, current):
+        version.mkdir(parents=True)
+        (version / "lib").write_bytes(b"x" * 10_000)
+    cleanup_output = f"Would remove: {old} (1 file, 1KB)\n==> This operation would free approximately 1KB of disk space.\n"
+    outputs = {
+        ("brew", "--cellar"): f"{tmp_path}\n",
+        ("brew", "autoremove", "--dry-run"): "==> Would autoremove 1 unneeded formula:\nlibfoo\n",
+        brew._CLEANUP_DRY_RUN: cleanup_output,
+    }
+    mocker.patch(
+        "purger.plugins.brew.run_command",
+        autospec=True,
+        side_effect=lambda argv, **_: _completed(stdout=outputs[tuple(argv)]),
+    )
+    mocker.patch(
+        "purger.sizing.run_command",
+        autospec=True,
+        side_effect=lambda argv, **_: _completed(stdout=outputs[tuple(argv)]),
+    )
+
+    # When
+    report = measure_plugin(brew.PLUGIN, include_dangerous=False)
+
+    # Then the footprint is cleanup's total plus only the version cleanup leaves
+    assert report.footprint_bytes == 1024 + disk_usage([current])
+    sizes = {r.action.name: r.size_bytes for r in report.actions}
+    assert sizes == {"cleanup": 1024, "autoremove": disk_usage([old, current])}
+
+
+def test_brew_footprint_falls_back_to_cleanup_when_autoremove_fails(
+    mocker: MockerFixture,
+) -> None:
+    """Verify the footprint keeps cleanup's total when the autoremove dry run fails."""
+    # Given
+    mocker.patch(
+        "purger.plugins.brew.run_command",
+        autospec=True,
+        side_effect=ShellCommandNotFoundError(argv=["brew"]),
+    )
+    output = "==> This operation would free approximately 2KB of disk space.\n"
+
+    # When / Then
+    assert brew._footprint(output) == 2048
+
+
 def test_mise_prunable_install_paths() -> None:
     """Verify every prunable version's install path is read from the JSON."""
     # Given
@@ -239,10 +291,12 @@ def test_pre_commit_cache_dir_lookup_order(
 
 @pytest.mark.parametrize("module", [pip, yarn], ids=["pip", "yarn"])
 def test_path_cache_plugins_available_only_with_a_cache(
-    module: ModuleType, tmp_path: Path, mocker: MockerFixture
+    module: ModuleType, tmp_path: Path, mocker: MockerFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Verify path-only plugins apply only when a cache holds something, without the tool installed."""
-    # Given an empty home
+    # Given an empty home and no XDG_CACHE_HOME pointing outside it
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    mocker.patch.object(module, "_CACHE_PATHS", module._cache_patterns())
     mocker.patch("purger.sizing.invoking_home", return_value=tmp_path)
     assert module.PLUGIN.is_available is not None
     before = module.PLUGIN.is_available()
@@ -255,6 +309,22 @@ def test_path_cache_plugins_available_only_with_a_cache(
     # Then
     assert before is False
     assert module.PLUGIN.is_available() is True
+
+
+@pytest.mark.parametrize("module", [pip, yarn], ids=["pip", "yarn"])
+def test_path_cache_plugins_follow_xdg_cache_home(
+    module: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify pip and Yarn 1 caches are found under XDG_CACHE_HOME, where both write on Linux."""
+    # Given
+    monkeypatch.setenv("XDG_CACHE_HOME", "/home/me/xdg")
+
+    # When
+    patterns = module._cache_patterns()
+
+    # Then
+    assert f"/home/me/xdg/{module.PLUGIN.name}/*" in patterns
+    assert f"~/.cache/{module.PLUGIN.name}/*" in patterns
 
 
 def test_npm_footprint_counts_only_cleanable_parts(tmp_path: Path, mocker: MockerFixture) -> None:
@@ -427,6 +497,7 @@ def test_ansible_available_only_when_idle_with_leftovers(
     "cmdline",
     [
         ["/usr/bin/python3", "/Users/me/.local/bin/ansible-playbook", "site.yml"],
+        ["/usr/bin/python3", "-sP", "/usr/bin/ansible-playbook", "site.yml"],
         ["/opt/homebrew/bin/ansible", "all", "-m", "ping"],
         ["ansible-galaxy", "install", "-r", "requirements.yml"],
     ],

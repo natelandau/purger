@@ -19,10 +19,11 @@ def env_dir(var: str, default: str) -> str:
 
     Returns:
         str: The folder without a trailing slash, with glob characters in the
-            variable's value escaped so they match literally.
+            variable's value escaped so they match literally. A relative value
+            counts as unset, since it would resolve against the working directory.
     """
     value = os.environ.get(var, "").rstrip("/")
-    return glob.escape(value) if value else default
+    return glob.escape(value) if value.startswith(("/", "~")) else default
 
 
 def process_running(matches: Callable[[list[str]], bool]) -> bool:

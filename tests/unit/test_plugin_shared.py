@@ -13,6 +13,7 @@ from purger.plugins._shared import env_dir, process_running
         ("", "~/.cargo"),
         ("/opt/data/", "/opt/data"),
         ("/Users/me/odd[dir]", "/Users/me/odd[[]dir]"),
+        ("relative/data", "~/.cargo"),
     ],
 )
 def test_env_dir_prefers_the_variable(

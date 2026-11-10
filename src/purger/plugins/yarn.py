@@ -1,11 +1,34 @@
 """Plugin for the Yarn global package caches."""
 
 from purger.plugin import Action, Plugin, Tier
+from purger.plugins._shared import env_dir
 from purger.sizing import expand_paths
 
-# Yarn 1 cache on macOS and Linux, then the Yarn 2+ global mirror. Deleted by path
-# so the plugin works without running yarn, which a corepack shim may try to download.
-_CACHE_PATHS = ("~/Library/Caches/Yarn/*", "~/.cache/yarn/*", "~/.yarn/berry/cache/*")
+
+def _cache_patterns() -> tuple[str, ...]:
+    """List the Yarn cache contents to delete, as glob-safe patterns.
+
+    Covers the Yarn 1 cache on macOS and Linux, where it follows `XDG_CACHE_HOME`,
+    then the Yarn 2+ global mirror. Deleted by path so the plugin works without
+    running yarn, which a corepack shim may try to download.
+
+    Returns:
+        tuple[str, ...]: Cache content patterns, without duplicates.
+    """
+    xdg_cache = env_dir("XDG_CACHE_HOME", "~/.cache")
+    return tuple(
+        dict.fromkeys(
+            (
+                "~/Library/Caches/Yarn/*",
+                "~/.cache/yarn/*",
+                f"{xdg_cache}/yarn/*",
+                "~/.yarn/berry/cache/*",
+            )
+        )
+    )
+
+
+_CACHE_PATHS = _cache_patterns()
 
 
 def _has_cache() -> bool:
