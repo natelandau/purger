@@ -1,20 +1,31 @@
 [project]
     authors = [{ name = "Nate Landau", email = "github@natenate.org" }]
     classifiers = [
+        "Environment :: Console",
+        "Intended Audience :: Developers",
+        "Operating System :: MacOS",
+        "Operating System :: POSIX :: Linux",
         "Programming Language :: Python :: 3.13",
         "Programming Language :: Python :: 3.14",
         "Programming Language :: Python :: 3.15",
+        "Topic :: System :: Filesystems",
+        "Topic :: Utilities",
     ]
-    dependencies = [
-    "nclutils>=3.4.4,<4.0.0",
-    "rich>=15.0.0",
-]
-    description = "Purge application caches and free up disk space."
-    license = { file = "LICENSE" }
+    dependencies = ["cyclopts>=5.4.0,<6", "nclutils>=4.0.0,<5.0.0", "rich>=15.0.0,<16"]
+    description = "Find and clean rebuildable developer caches to free disk space."
+    keywords = ["cache", "cleanup", "cli", "disk-space", "docker", "homebrew", "uv", "xcode"]
+    license = "MIT"
+    license-files = ["LICENSE"]
     name = "purger"
     readme = "README.md"
-    requires-python = ">=3.13,<3.16"
+    requires-python = ">=3.13"
     version = "0.1.0"
+
+    [project.urls]
+        Changelog  = "https://github.com/natelandau/purger/releases"
+        Homepage   = "https://github.com/natelandau/purger"
+        Issues     = "https://github.com/natelandau/purger/issues"
+        Repository = "https://github.com/natelandau/purger"
 
     [project.scripts]
         purger = "purger.cli:main"
@@ -35,7 +46,6 @@
         "prek>=0.5.10",
         "pytest-clarity>=1.0.1",
         "pytest-cov>=7.1.0",
-        "pytest-devtools>=1.3.0",
         "pytest-mock>=3.17.0",
         "pytest-repeat>=0.9.4",
         "pytest-sugar>=1.1.1",
@@ -51,22 +61,18 @@
 [tool.commitizen]
     bump_message               = "bump(release): v$current_version → v$new_version"
     changelog_merge_prerelease = true
+    major_version_zero         = true
     tag_format                 = "v$version"
     update_changelog_on_bump   = true
     version_files              = ["src/purger/__init__.py:__version__"]
     version_provider           = "uv"
 
 [tool.coverage.report] # https://coverage.readthedocs.io/en/latest/config.html#report
-    exclude_lines = [
-        'def __repr__',
-        'except [\w\s\._]+ as .*:',
-        'if TYPE_CHECKING',
-        'pragma: no cover',
-    ]
-    fail_under = 10
-    show_missing = true
-    skip_covered = true
-    skip_empty = true
+    exclude_lines = ['def __repr__', 'if TYPE_CHECKING', 'pragma: no cover']
+    fail_under    = 90
+    show_missing  = true
+    skip_covered  = true
+    skip_empty    = true
 
 [tool.coverage.run]
     branch       = true
@@ -80,18 +86,15 @@
 
 [tool.pytest.ini_options]
 
-    addopts        = "--color=yes --doctest-modules --strict-config --strict-markers -n auto --dist loadfile"
+    addopts        = "--color=yes --strict-config --strict-markers -n auto --dist loadfile"
     cache_dir      = ".cache/pytest"
-    columns        = 120
-    filterwarnings = ['error', 'ignore:.*Pydantic.*:UserWarning', 'ignore::DeprecationWarning:']
-    markers        = ["serial"]
-    set_columns    = true
+    filterwarnings = ['error']
     testpaths      = ["tests"]
     xfail_strict   = true
 
 [tool.ruff] # https://github.com/charliermarsh/ruff
 
-    exclude        = [".cache", ".git", ".venv", "build", "dist", "reference"]
+    exclude        = [".cache", ".git", ".venv", "build", "dist"]
     fix            = true
     line-length    = 100
     output-format  = "grouped"
@@ -108,7 +111,6 @@
             "E501",    # line-too-long
             "FIX002",  # Line contains TODO, consider resolving the issue
             "PLC0415", # Imports should be at top of file
-            "S311",    # suspicious-non-cryptographic-random-usage
             "TD001",   # invalid-todo-tag
             "TD002",   # Missing author in TODO
             "TD003",   # Missing issue link on the line following this TODO
@@ -125,8 +127,6 @@
             "ARG005",  # Unused lambda argument
             "D102",
             "ERA001",  # Commented out code
-            "F403",
-            "F405",    # May be undefined from type imports
             "FBT001",  # Boolean-typed positional argument in function definition
             "PGH003",  # Use specific rule codes when ignoring type issues
             "PLC0415", # Imports should be at top of file
@@ -136,7 +136,6 @@
             "PLW0108", # Lambda may be unnecessary; consider inlining inner function
             "S101",
             "SLF001",  # Calling private method
-            "W292",    # No blank line at end of file - included b/c cursor struggles to add a trailing newline and burns through requests trying to fix this linting error.
         ] }
         select = ["ALL"]
         unfixable = [
