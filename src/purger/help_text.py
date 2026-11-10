@@ -37,7 +37,7 @@ Show the caches on this machine and how much space each uses.
 
 Read-only: info never deletes anything. It measures every plugin that applies
 to this machine and prints a table with one row per tool: its cache size and
-description, largest first, and a total at the bottom. A check under `Partial
+description, sorted by name, and a total at the bottom. A check under `Partial
 purge` means a clean frees only part of that size, because the tool decides at
 run time what it still needs. Sizes that cannot be measured show `?` and are
 left out of the total. `dangerous` actions are left out unless you pass

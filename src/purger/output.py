@@ -72,7 +72,7 @@ def _table() -> Table:
 
 
 def render_table(reports: list[PluginReport]) -> Table:
-    """Build the table of tools and their cache sizes, largest first.
+    """Build the table of tools and their cache sizes, sorted by name.
 
     Action names and tiers stay out of this table so users never need to know
     which commands purger runs inside each tool.
@@ -85,7 +85,7 @@ def render_table(reports: list[PluginReport]) -> Table:
     """
     rows = sorted(
         ((report, is_partial(report)) for report in reports),
-        key=lambda row: _largest_first(row[0].footprint_bytes, row[0].plugin.name),
+        key=lambda row: row[0].plugin.name.casefold(),
     )
     any_partial = any(partial for _, partial in rows)
     table = _table()

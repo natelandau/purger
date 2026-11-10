@@ -244,13 +244,13 @@ def test_is_partial_empty_footprint_with_unknown_outside_action() -> None:
     assert is_partial(report) is True
 
 
-def test_render_table_one_row_per_tool_sorted_by_size() -> None:
-    """Verify the table shows one row per tool, largest first, with no action names or tiers."""
-    # Given an exact tool, an unknown-size tool, and a partial tool
+def test_render_table_one_row_per_tool_sorted_by_name() -> None:
+    """Verify the table shows one row per tool, sorted by name, with no action names or tiers."""
+    # Given an exact tool, an unknown-size tool, and a partial tool, out of name order
     reports = [
-        _sized("alpha", 2048, 2048),
-        _sized("beta", None, None),
         _sized("gamma", 4096, None),
+        _sized("beta", None, None),
+        _sized("alpha", 2048, 2048),
     ]
 
     # When
@@ -260,7 +260,7 @@ def test_render_table_one_row_per_tool_sorted_by_size() -> None:
     # Then
     for header in ("Cache", "Size", "Partial", "Description"):
         assert header in text
-    assert text.index("gamma") < text.index("alpha") < text.index("beta")
+    assert text.index("alpha") < text.index("beta") < text.index("gamma")
     assert "act0" not in text
     assert "safe" not in text
     assert table_row(table, "gamma") == ["gamma", human_size(4096), "\u2713", "gamma tool"]
