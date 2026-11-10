@@ -71,7 +71,7 @@ PLUGIN = Plugin(
             # CAUTION: a rebuild is slow or needs the user to act.
             # DANGEROUS: the data may be lost for good. Runs only with --dangerous.
             tier=Tier.SAFE,
-            # Shown in prompts and the help page. Say what a rebuild costs.
+            # Shown in prompts and the JSON output. Say what a rebuild costs.
             help="Remove packages no longer in use. They download again when needed.",
             # The tool's own cleanup command. Prefer it to deleting paths.
             command=("example-tool", "cache", "prune"),

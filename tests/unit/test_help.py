@@ -25,8 +25,8 @@ def _help(*args: str) -> str:
 
 
 @pytest.mark.parametrize("command", [(), ("info",), ("clean",)])
-def test_help_lists_every_plugin_and_action(command: tuple[str, ...]) -> None:
-    """Verify every registered plugin and action name appears in each help page."""
+def test_help_lists_every_plugin_on_one_line(command: tuple[str, ...]) -> None:
+    """Verify each help page lists every plugin on one line without its actions."""
     # Given
     plugins = discover_plugins()
 
@@ -34,11 +34,12 @@ def test_help_lists_every_plugin_and_action(command: tuple[str, ...]) -> None:
     text = _help(*command)
 
     # Then
+    lines = text.splitlines()
     for plugin in plugins.values():
-        assert plugin.name in text
-        assert plugin.description in text
+        assert any(f"{plugin.name}: {plugin.description}" in line for line in lines)
         for action in plugin.actions:
-            assert action.name in text
+            if action.help:
+                assert action.help not in text
 
 
 def test_top_level_help_has_agent_notes() -> None:
@@ -93,8 +94,8 @@ def test_plugin_catalog_marks_unavailable(monkeypatch: pytest.MonkeyPatch) -> No
     everywhere_line = next(line for line in text.splitlines() if "everywhere" in line)
     assert "not available on this machine" in linux_line
     assert "not available on this machine" not in everywhere_line
-    assert "wipe" in text
-    assert "Wipe it" in text
+    assert "wipe" not in text
+    assert "Wipe it" not in text
 
 
 @pytest.mark.parametrize("command", [(), ("info",), ("clean",)])

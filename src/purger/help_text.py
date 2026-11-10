@@ -138,7 +138,7 @@ def _platforms(plugin: Plugin) -> str:
 
 
 def plugin_catalog(plugins: Iterable[Plugin]) -> str:
-    """Describe every plugin and its actions as markdown for the help pages.
+    """Describe every plugin in one line each as markdown for the help pages.
 
     Generating the list from the registry keeps help in step with the plugin files.
     Availability is judged by platform and required binary only, so rendering help
@@ -148,7 +148,7 @@ def plugin_catalog(plugins: Iterable[Plugin]) -> str:
         plugins: Plugins to describe.
 
     Returns:
-        str: A markdown section listing each plugin with its actions and tiers.
+        str: A markdown section listing each plugin with its platforms.
     """
     lines = ["**Available plugins**", ""]
     for plugin in plugins:
@@ -156,13 +156,6 @@ def plugin_catalog(plugins: Iterable[Plugin]) -> str:
         if skip_reason(plugin, check_available=False) is not None:
             line += ", *not available on this machine*"
         lines.append(line)
-        for action in plugin.actions:
-            entry = f"    - `{action.name}` ({action.tier.value})"
-            if action.help:
-                entry += f": {action.help}"
-            if action.needs_sudo:
-                entry += " Runs with sudo."
-            lines.append(entry)
     return "\n".join(lines) + "\n"
 
 
