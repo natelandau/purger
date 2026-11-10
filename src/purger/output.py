@@ -4,6 +4,7 @@ import sys
 from typing import Any
 
 from nclutils.strings import human_size
+from rich import box
 from rich.markup import escape
 from rich.table import Table
 
@@ -64,6 +65,12 @@ def _largest_first(size: int | None, name: str) -> tuple[bool, int, str]:
     return (size is None, -(size or 0), name)
 
 
+def _table() -> Table:
+    return Table(
+        show_footer=True, expand=False, box=box.SIMPLE, show_edge=False, footer_style="bold"
+    )
+
+
 def render_table(reports: list[PluginReport]) -> Table:
     """Build the table of tools and their cache sizes, largest first.
 
@@ -81,7 +88,7 @@ def render_table(reports: list[PluginReport]) -> Table:
         key=lambda row: _largest_first(row[0].footprint_bytes, row[0].plugin.name),
     )
     any_partial = any(partial for _, partial in rows)
-    table = Table(show_footer=True, expand=False)
+    table = _table()
     table.add_column("Cache", footer="Total")
     table.add_column("Size", justify="right", footer=_size_text(grand_total(reports)))
     table.add_column("Partial\npurge", justify="center", footer=_CHECK if any_partial else "")
@@ -107,7 +114,7 @@ def render_results(ran: list[PluginReport]) -> Table:
     """
     # Freed is known only when both sizes are, so these totals agree with each other.
     measured = [r for r in ran if r.freed_bytes is not None]
-    table = Table(show_footer=True, expand=False)
+    table = _table()
     table.add_column("Cache", footer="Total")
     for title, values in (
         ("Before", [r.footprint_bytes for r in measured]),

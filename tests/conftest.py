@@ -4,6 +4,8 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
+from rich.table import Table
+from rich.text import Text
 
 from purger.plugin import Action, Plugin, Tier
 
@@ -31,10 +33,17 @@ def make_plugin(**overrides: Any) -> Plugin:
     return Plugin(**fields)
 
 
-def table_row(text: str, name: str) -> list[str]:
-    """Return the stripped cells of the first rendered table row that names a plugin."""
-    line = next(line for line in text.splitlines() if f" {name} " in line)
-    return [cell.strip() for cell in line.split("\u2502")[1:-1]]
+def table_row(table: Table, name: str) -> list[str]:
+    """Return the plain cell text of the row whose first cell is name, or the footer for "Total".
+
+    Reads the table's data rather than its rendering, so the tests survive style changes.
+    """
+    if name == "Total":
+        cells = [column.footer for column in table.columns]
+    else:
+        rows = zip(*(list(column.cells) for column in table.columns), strict=True)
+        cells = next(row for row in rows if Text.from_markup(str(row[0])).plain == name)
+    return [Text.from_markup(str(cell)).plain for cell in cells]
 
 
 @pytest.fixture(name="make_action")

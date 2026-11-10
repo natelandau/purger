@@ -500,6 +500,8 @@ def test_clean_human_prints_results_table(
     _patch_measure(mocker, side_effect=[before, after])
     mocker.patch("purger.execution.run_action", autospec=True, side_effect=_mark_done)
 
+    results = mocker.spy(cli, "render_results")
+
     # When
     code = _run("clean", "--yes")
 
@@ -508,8 +510,7 @@ def test_clean_human_prints_results_table(
     assert code == ExitCode.OK
     for header in ("Before", "After", "Freed"):
         assert header in out
-    results = out[out.index("Before") :]
-    assert table_row(results, "alpha") == ["alpha", "100 B", "40 B", "60 B"]
+    assert table_row(results.spy_return, "alpha") == ["alpha", "100 B", "40 B", "60 B"]
     assert "Freed 60 B" not in out
     assert "Status" not in out
 

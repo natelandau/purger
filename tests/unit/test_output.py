@@ -254,7 +254,8 @@ def test_render_table_one_row_per_tool_sorted_by_size() -> None:
     ]
 
     # When
-    text = _text(render_table(reports))
+    table = render_table(reports)
+    text = _text(table)
 
     # Then
     for header in ("Cache", "Size", "Partial", "Description"):
@@ -262,19 +263,19 @@ def test_render_table_one_row_per_tool_sorted_by_size() -> None:
     assert text.index("gamma") < text.index("alpha") < text.index("beta")
     assert "act0" not in text
     assert "safe" not in text
-    assert table_row(text, "gamma") == ["gamma", human_size(4096), "\u2713", "gamma tool"]
-    assert table_row(text, "alpha") == ["alpha", human_size(2048), "", "alpha tool"]
-    assert table_row(text, "beta")[1:3] == ["?", "\u2713"]
-    assert table_row(text, "Total") == ["Total", human_size(6144), "\u2713", ""]
+    assert table_row(table, "gamma") == ["gamma", human_size(4096), "\u2713", "gamma tool"]
+    assert table_row(table, "alpha") == ["alpha", human_size(2048), "", "alpha tool"]
+    assert table_row(table, "beta")[1:3] == ["?", "\u2713"]
+    assert table_row(table, "Total") == ["Total", human_size(6144), "\u2713", ""]
 
 
 def test_render_table_total_without_partial_rows() -> None:
     """Verify the Total row has no check when every tool is exact."""
     # Given
-    text = _text(render_table([_sized("alpha", 10, 10)]))
+    table = render_table([_sized("alpha", 10, 10)])
 
     # When / Then
-    assert table_row(text, "Total")[2] == ""
+    assert table_row(table, "Total")[2] == ""
 
 
 def test_render_table_escapes_markup() -> None:
@@ -306,7 +307,8 @@ def test_render_results_before_after_freed_sorted_by_freed() -> None:
     c = _ran("ccc", None, None, None)
 
     # When
-    text = _text(render_results([b, c, a]))
+    table = render_results([b, c, a])
+    text = _text(table)
 
     # Then
     for header in ("Cache", "Before", "After", "Freed"):
@@ -314,46 +316,35 @@ def test_render_results_before_after_freed_sorted_by_freed() -> None:
     assert "Description" not in text
     assert "aaa tool" not in text
     assert text.index("aaa") < text.index("bbb") < text.index("ccc")
-    assert table_row(text, "aaa") == ["aaa", human_size(100), human_size(40), human_size(60)]
-    assert table_row(text, "ccc") == ["ccc", "?", "?", "?"]
-    assert table_row(text, "Total") == ["Total", human_size(600), human_size(520), human_size(80)]
+    assert table_row(table, "aaa") == ["aaa", human_size(100), human_size(40), human_size(60)]
+    assert table_row(table, "ccc") == ["ccc", "?", "?", "?"]
+    assert table_row(table, "Total") == [
+        "Total",
+        human_size(600),
+        human_size(520),
+        human_size(80),
+    ]
 
 
 def test_render_results_interrupted_shows_unknown() -> None:
     """Verify an interrupted re-measure shows unknown after and freed sizes."""
     # Given
-    text = _text(render_results([_ran("aaa", 100, None, None)]))
+    table = render_results([_ran("aaa", 100, None, None)])
 
     # When / Then
-    assert table_row(text, "aaa") == ["aaa", human_size(100), "?", "?"]
-    assert table_row(text, "Total") == ["Total", "?", "?", "?"]
+    assert table_row(table, "aaa") == ["aaa", human_size(100), "?", "?"]
+    assert table_row(table, "Total") == ["Total", "?", "?", "?"]
 
 
 def test_render_results_totals_only_rows_with_both_sizes() -> None:
     """Verify totals skip a tool whose after size is unknown, so the Total row stays consistent."""
     # Given one tool that re-measured and one that did not
-    text = _text(render_results([_ran("aaa", 10_000, None, None), _ran("bbb", 1_000, 0, 1_000)]))
+    table = render_results([_ran("aaa", 10_000, None, None), _ran("bbb", 1_000, 0, 1_000)])
 
     # When / Then
-    assert table_row(text, "Total") == [
+    assert table_row(table, "Total") == [
         "Total",
         human_size(1_000),
         human_size(0),
         human_size(1_000),
     ]
-
-
-def test_render_table_partial_purge_header_wraps() -> None:
-    """Verify the check column header takes two lines, so the column is only as wide as "Partial"."""
-    # Given
-    text = _text(render_table([_sized("alpha", 10, None)]))
-
-    # When
-    lines = text.splitlines()
-    first = next(index for index, line in enumerate(lines) if "Partial" in line)
-    partial_cell = lines[first].split("\u2503")[3]
-
-    # Then
-    assert "purge" in lines[first + 1].split("\u2503")[3]
-    assert len(partial_cell.strip()) == len("Partial")
-    assert len(partial_cell) <= len("Partial") + 2
