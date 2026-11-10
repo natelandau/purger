@@ -24,11 +24,10 @@ class Action:
     Declaring actions as data lets the CLI size, confirm, and run every
     plugin the same way. When both `command` and `paths` are set, only the
     command runs and the paths are used to size and list what it removes.
-    Set `outside_footprint` when the plugin's own
-    footprint does not cover this action's data, so its size is added to the
-    footprint whenever the action is measured. Set `explain_failure` to turn
-    a failed command's stderr into a hint about the likely cause; it returns
-    None when it has nothing to add.
+    Set `outside_footprint` when the plugin's own footprint does not cover this
+    action's data, so its size is added to the footprint whenever the action is
+    measured. Set `explain_failure` to turn a failed command's stderr into a
+    hint about the likely cause; it returns None when it has nothing to add.
 
     Raises:
         ValueError: If the name is not kebab-case, neither command nor paths
@@ -37,7 +36,7 @@ class Action:
 
     name: str
     tier: Tier
-    help: str = ""
+    help: str
     command: tuple[str, ...] | None = None
     paths: tuple[str, ...] = ()
     size_cmd: tuple[str, ...] | None = None

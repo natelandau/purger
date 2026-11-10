@@ -35,7 +35,8 @@ def is_partial(report: PluginReport) -> bool:
 
     A tool is exact when every included action has a known size, or when the
     known sizes cover the whole footprint, such as a full-wipe action under
-    `--dangerous`. The report holds only the actions this run includes.
+    `--dangerous`, or when there is nothing to free. The report holds only the
+    actions this run includes.
 
     Args:
         report: The measured plugin.
@@ -45,6 +46,12 @@ def is_partial(report: PluginReport) -> bool:
     """
     sizes = [action.size_bytes for action in report.actions]
     if None not in sizes:
+        return False
+    # An unknown size outside the footprint means a zero footprint may still hide data.
+    unknown_outside = any(
+        action.size_bytes is None and action.action.outside_footprint for action in report.actions
+    )
+    if report.footprint_bytes == 0 and not unknown_outside:
         return False
     known = sum_known(sizes)
     if report.footprint_bytes is None or known is None:

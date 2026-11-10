@@ -385,7 +385,7 @@ def test_clean_interactive_yes_still_confirms_caution_and_notes_sudo(
     err = capsys.readouterr().err
     assert code == ExitCode.OK
     assert ask.call_count == 1
-    assert ask.call_args.args[1].startswith("alpha: ")
+    assert ask.call_args.args[1].startswith("alpha (about ")
     assert [c.args[0].action.name for c in run_action.call_args_list] == ["sudo-safe"]
     assert "alpha/sudo-safe" in err
     assert "sudo" in err

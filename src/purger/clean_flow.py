@@ -61,9 +61,11 @@ def risky_prompt(plugin_name: str, report: ActionReport) -> str:
     action name.
     """
     action = report.action
-    text = f"{plugin_name}: {action.help.strip().rstrip('.')}"
+    text = plugin_name
     if report.size_bytes is not None:
+        # Before the help, which can hold several sentences the size must not attach to.
         text += f" (about {human_size(report.size_bytes)})"
+    text += f": {action.help.strip().rstrip('.')}"
     if action.tier is Tier.DANGEROUS:
         text += ". This may permanently delete data"
     if action.needs_sudo:
