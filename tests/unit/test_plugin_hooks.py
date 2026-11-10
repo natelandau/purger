@@ -1,5 +1,6 @@
 """Tests for plugin size-parsing and availability hooks."""
 
+from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
 
@@ -7,7 +8,8 @@ import pytest
 from nclutils.sh import CompletedCommand, ShellCommandNotFoundError
 from pytest_mock import MockerFixture
 
-from purger.plugins import brew, docker, mise, pip, pre_commit, yarn
+from purger.output import is_partial
+from purger.plugins import apt, brew, docker, mise, npm, pip, pre_commit, yarn
 from purger.plugins.brew import _parse_dry_run
 from purger.sizing import disk_usage, measure_plugin
 
@@ -234,3 +236,46 @@ def test_path_cache_plugins_available_only_with_a_cache(
     # Then
     assert before is False
     assert module.PLUGIN.is_available() is True
+
+
+def test_npm_footprint_counts_only_cleanable_parts(tmp_path: Path, mocker: MockerFixture) -> None:
+    """Verify the npm footprint leaves out logs, so its two cleanups cover all of it."""
+    # Given an npm cache with the package cache, the npx cache, and logs
+    for part, size in (("_cacache", 10_000), ("_npx", 10_000), ("_logs", 50_000)):
+        (tmp_path / part).mkdir()
+        (tmp_path / part / "f").write_bytes(b"x" * size)
+    mocker.patch(
+        "purger.sizing.run_command", autospec=True, return_value=_completed(stdout=f"{tmp_path}\n")
+    )
+
+    # When
+    report = measure_plugin(npm.PLUGIN, include_dangerous=True)
+
+    # Then
+    assert report.footprint_bytes == disk_usage([tmp_path / "_cacache", tmp_path / "_npx"])
+    assert is_partial(report) is False
+
+
+def test_apt_footprint_matches_clean(tmp_path: Path, mocker: MockerFixture) -> None:
+    """Verify apt is exact: its footprint counts only the package files that clean removes."""
+    # Given an apt archive with a package, a lock file, and a partial download directory
+    archives = tmp_path / "archives"
+    (archives / "partial").mkdir(parents=True)
+    (archives / "pkg.deb").write_bytes(b"x" * 10_000)
+    (archives / "lock").write_bytes(b"x" * 100)
+
+    def moved(paths: tuple[str, ...]) -> tuple[str, ...]:
+        return tuple(path.replace("/var/cache/apt/archives", str(archives)) for path in paths)
+
+    plugin = replace(
+        apt.PLUGIN,
+        paths=moved(apt.PLUGIN.paths),
+        actions=tuple(replace(a, paths=moved(a.paths)) for a in apt.PLUGIN.actions),
+    )
+
+    # When
+    report = measure_plugin(plugin, include_dangerous=False)
+
+    # Then
+    assert report.footprint_bytes == disk_usage([archives / "pkg.deb"])
+    assert is_partial(report) is False

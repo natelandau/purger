@@ -5,6 +5,7 @@ from pathlib import Path
 from pytest_mock import MockerFixture
 
 from purger.execution import execute, mark_unfinished, record_freed
+from purger.plugin import Plugin
 from purger.reports import ActionReport, PluginReport, Status
 from tests.conftest import make_action, make_plugin
 
@@ -111,6 +112,7 @@ def test_record_freed_sets_difference_and_clamps(mocker: MockerFixture) -> None:
     # Then
     assert interrupted is False
     assert [r.freed_bytes for r in (shrank, grew, unknown)] == [60, 0, None]
+    assert [r.after_bytes for r in (shrank, grew, unknown)] == [40, 150, None]
 
 
 def test_record_freed_interrupt_clears_freed(mocker: MockerFixture) -> None:
@@ -125,6 +127,29 @@ def test_record_freed_interrupt_clears_freed(mocker: MockerFixture) -> None:
     # Then
     assert interrupted is True
     assert report.freed_bytes is None
+    assert report.after_bytes is None
+
+
+def test_record_freed_interrupt_clears_sizes_already_measured(mocker: MockerFixture) -> None:
+    """Verify Ctrl-C clears after sizes recorded before the interrupt, so no half result shows."""
+    # Given one plugin measured before the interrupt
+    first = _plugin_report("first", "a", footprint=100)
+    second = _plugin_report("second", "a", footprint=100)
+
+    def measure(plugin: Plugin, *, include_dangerous: bool) -> int:
+        if plugin.name == "second":
+            raise KeyboardInterrupt
+        return 40
+
+    mocker.patch("purger.execution.measure_footprint", autospec=True, side_effect=measure)
+
+    # When
+    interrupted = record_freed([first, second], dangerous=False, show_progress=False)
+
+    # Then
+    assert interrupted is True
+    assert [r.after_bytes for r in (first, second)] == [None, None]
+    assert [r.freed_bytes for r in (first, second)] == [None, None]
 
 
 def test_record_freed_nothing_ran_measures_nothing(mocker: MockerFixture) -> None:

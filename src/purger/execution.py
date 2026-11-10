@@ -100,6 +100,7 @@ def _set_freed(ran: list[PluginReport], *, dangerous: bool) -> None:
     for index, after in map_as_completed(measure, items=plugins):
         plugin_report = ran[index]
         before = plugin_report.footprint_bytes
+        plugin_report.after_bytes = after
         plugin_report.freed_bytes = (
             None if before is None or after is None else max(before - after, 0)
         )
@@ -125,5 +126,6 @@ def record_freed(ran: list[PluginReport], *, dangerous: bool, show_progress: boo
     except KeyboardInterrupt:
         for plugin_report in ran:
             plugin_report.freed_bytes = None
+            plugin_report.after_bytes = None
         return True
     return False

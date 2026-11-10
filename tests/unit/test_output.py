@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from nclutils.strings import human_size
 from rich.console import Console
+from rich.table import Table
 
 from purger.output import (
     SCHEMA_VERSION,
@@ -14,11 +15,13 @@ from purger.output import (
     error_document,
     grand_total,
     info_document,
+    is_partial,
+    render_results,
     render_table,
 )
 from purger.plugin import Tier
 from purger.reports import ActionReport, PluginReport, SkippedPlugin, SkipReason, Status
-from tests.conftest import make_action, make_plugin
+from tests.conftest import make_action, make_plugin, table_row
 
 
 def _reports() -> list[PluginReport]:
@@ -50,10 +53,23 @@ def _reports() -> list[PluginReport]:
     ]
 
 
-def _render(*, show_status: bool = False) -> str:
+def _text(table: Table) -> str:
     console = Console(record=True, width=120)
-    console.print(render_table(_reports(), show_status=show_status))
+    console.print(table)
     return console.export_text()
+
+
+def _sized(name: str, footprint: int | None, *sizes: int | None) -> PluginReport:
+    """Build a plugin report whose actions have the given sizes."""
+    actions = [
+        ActionReport(action=make_action(name=f"act{i}"), size_bytes=size, resolved_paths=[])
+        for i, size in enumerate(sizes)
+    ]
+    return PluginReport(
+        plugin=make_plugin(name=name, description=f"{name} tool"),
+        footprint_bytes=footprint,
+        actions=actions,
+    )
 
 
 def test_grand_total_sums_known_and_none_when_all_unknown() -> None:
@@ -146,32 +162,6 @@ def test_error_document() -> None:
     }
 
 
-def test_render_table_rows() -> None:
-    """Verify the table lists plugins, actions, tiers, sizes, and the total footer."""
-    # Given / When rendering a plugin with known and unknown actions, and an empty plugin
-    text = _render()
-
-    # Then
-    for expected in ("alpha", "Alpha tool", "beta", "prune", "wipe", "safe", "dangerous"):
-        assert expected in text
-    assert human_size(2048) in text
-    assert "Prune [cache]" in text
-    assert "Found in caches" in text
-    assert "-" in text
-    assert "Status" not in text
-
-
-def test_render_table_status_column() -> None:
-    """Verify show_status adds a Status column with the action outcomes."""
-    # Given / When rendering a plugin with known and unknown actions, and an empty plugin
-    text = _render(show_status=True)
-
-    # Then
-    assert "Status" in text
-    assert "done" in text
-    assert "failed" in text
-
-
 def test_grand_total_sums_several_known_footprints() -> None:
     """Verify grand_total adds every known footprint and ignores unknown ones."""
     # Given three plugins, two with known footprints
@@ -201,37 +191,148 @@ def test_clean_document_sums_several_freed() -> None:
     assert doc["total_freed_bytes"] == 12
 
 
-def test_render_table_unknown_size_shows_dash() -> None:
-    """Verify an action of unknown size shows `-` in its Size cell."""
-    # Given
-    console = Console(record=True, width=120)
-
-    # When
-    console.print(render_table(_reports()))
-
-    # Then the wipe row's size column is a dash
-    wipe_row = next(line for line in console.export_text().splitlines() if "wipe" in line)
-    cells = [cell.strip() for cell in wipe_row.split("\u2502")]
-    assert cells[3] == "-"
-
-
 @pytest.mark.parametrize(
-    ("tier", "color"),
-    [(Tier.SAFE, "green"), (Tier.CAUTION, "yellow"), (Tier.DANGEROUS, "red")],
+    ("footprint", "sizes", "expected"),
+    [
+        (100, (40, 60), False),
+        (100, (None, 100), False),
+        (100, (None, 60), True),
+        (100, (None,), True),
+        (None, (None,), True),
+        (None, (5,), False),
+        (100, (), False),
+    ],
+    ids=[
+        "all-known",
+        "known-covers-footprint",
+        "unknown-part-remains",
+        "only-unknown",
+        "unknown-footprint-and-action",
+        "unknown-footprint-known-action",
+        "no-included-actions",
+    ],
 )
-def test_render_table_colors_tiers(tier: Tier, color: str) -> None:
-    """Verify each tier is drawn in its own color."""
+def test_is_partial_rules(
+    footprint: int | None, sizes: tuple[int | None, ...], expected: bool
+) -> None:
+    """Verify a tool is partial unless its included actions account for the whole footprint."""
     # Given
-    action = ActionReport(action=make_action(name="x", tier=tier), size_bytes=1, resolved_paths=[])
-    report = PluginReport(
-        plugin=make_plugin(actions=(action.action,)), footprint_bytes=1, actions=[action]
-    )
-    console = Console(record=True, width=120, force_terminal=True, color_system="standard")
+    report = _sized("t", footprint, *sizes)
+
+    # When / Then
+    assert is_partial(report) is expected
+
+
+def test_render_table_one_row_per_tool_sorted_by_size() -> None:
+    """Verify the table shows one row per tool, largest first, with no action names or tiers."""
+    # Given an exact tool, an unknown-size tool, and a partial tool
+    reports = [
+        _sized("alpha", 2048, 2048),
+        _sized("beta", None, None),
+        _sized("gamma", 4096, None),
+    ]
 
     # When
-    console.print(render_table([report]))
-    text = console.export_text(styles=True)
+    text = _text(render_table(reports))
 
-    # Then the tier label carries the tier's ANSI color
-    ansi = {"green": "32", "yellow": "33", "red": "31"}[color]
-    assert f"\x1b[{ansi}m{tier.value}\x1b[0m" in text
+    # Then
+    for header in ("Cache", "Size", "Partial", "Description"):
+        assert header in text
+    assert text.index("gamma") < text.index("alpha") < text.index("beta")
+    assert "act0" not in text
+    assert "safe" not in text
+    assert table_row(text, "gamma") == ["gamma", human_size(4096), "\u2713", "gamma tool"]
+    assert table_row(text, "alpha") == ["alpha", human_size(2048), "", "alpha tool"]
+    assert table_row(text, "beta")[1:3] == ["?", "\u2713"]
+    assert table_row(text, "Total") == ["Total", human_size(6144), "\u2713", ""]
+
+
+def test_render_table_total_without_partial_rows() -> None:
+    """Verify the Total row has no check when every tool is exact."""
+    # Given
+    text = _text(render_table([_sized("alpha", 10, 10)]))
+
+    # When / Then
+    assert table_row(text, "Total")[2] == ""
+
+
+def test_render_table_escapes_markup() -> None:
+    """Verify descriptions are shown literally rather than parsed as rich markup."""
+    # Given
+    report = _sized("alpha", 1, 1)
+    report.plugin = make_plugin(name="alpha", description="Cache [bold]x[/bold]")
+
+    # When / Then
+    assert "Cache [bold]x[/bold]" in _text(render_table([report]))
+
+
+def _ran(name: str, before: int | None, after: int | None, freed: int | None) -> PluginReport:
+    """Build a report for a tool that ran, with its before, after, and freed sizes."""
+    return PluginReport(
+        plugin=make_plugin(name=name, description=f"{name} tool"),
+        footprint_bytes=before,
+        actions=[],
+        freed_bytes=freed,
+        after_bytes=after,
+    )
+
+
+def test_render_results_before_after_freed_sorted_by_freed() -> None:
+    """Verify the results table shows before, after, and freed per tool, most freed first."""
+    # Given
+    a = _ran("aaa", 100, 40, 60)
+    b = _ran("bbb", 500, 480, 20)
+    c = _ran("ccc", None, None, None)
+
+    # When
+    text = _text(render_results([b, c, a]))
+
+    # Then
+    for header in ("Cache", "Before", "After", "Freed"):
+        assert header in text
+    assert "Description" not in text
+    assert "aaa tool" not in text
+    assert text.index("aaa") < text.index("bbb") < text.index("ccc")
+    assert table_row(text, "aaa") == ["aaa", human_size(100), human_size(40), human_size(60)]
+    assert table_row(text, "ccc") == ["ccc", "?", "?", "?"]
+    assert table_row(text, "Total") == ["Total", human_size(600), human_size(520), human_size(80)]
+
+
+def test_render_results_interrupted_shows_unknown() -> None:
+    """Verify an interrupted re-measure shows unknown after and freed sizes."""
+    # Given
+    text = _text(render_results([_ran("aaa", 100, None, None)]))
+
+    # When / Then
+    assert table_row(text, "aaa") == ["aaa", human_size(100), "?", "?"]
+    assert table_row(text, "Total") == ["Total", "?", "?", "?"]
+
+
+def test_render_results_totals_only_rows_with_both_sizes() -> None:
+    """Verify totals skip a tool whose after size is unknown, so the Total row stays consistent."""
+    # Given one tool that re-measured and one that did not
+    text = _text(render_results([_ran("aaa", 10_000, None, None), _ran("bbb", 1_000, 0, 1_000)]))
+
+    # When / Then
+    assert table_row(text, "Total") == [
+        "Total",
+        human_size(1_000),
+        human_size(0),
+        human_size(1_000),
+    ]
+
+
+def test_render_table_partial_purge_header_wraps() -> None:
+    """Verify the check column header takes two lines, so the column is only as wide as "Partial"."""
+    # Given
+    text = _text(render_table([_sized("alpha", 10, None)]))
+
+    # When
+    lines = text.splitlines()
+    first = next(index for index, line in enumerate(lines) if "Partial" in line)
+    partial_cell = lines[first].split("\u2503")[3]
+
+    # Then
+    assert "purge" in lines[first + 1].split("\u2503")[3]
+    assert len(partial_cell.strip()) == len("Partial")
+    assert len(partial_cell) <= len("Partial") + 2

@@ -35,11 +35,13 @@ Start with `purger info` to see what can be cleaned, then run `purger clean`.
 INFO_HELP = """\
 Show the caches on this machine and how much space each uses.
 
-Read-only: info never deletes anything. It measures every action of every
-plugin that applies to this machine and prints a table grouped by plugin, with
-each action's tier, size, and description, and a total at the bottom. Sizes that
-cannot be measured show `-` and are left out of the total. `dangerous` actions
-are hidden unless you pass `--dangerous`. Plugins that do not apply here (wrong
+Read-only: info never deletes anything. It measures every plugin that applies
+to this machine and prints a table with one row per tool: its cache size and
+description, largest first, and a total at the bottom. A check under `Partial
+purge` means a clean frees only part of that size, because the tool decides at
+run time what it still needs. Sizes that cannot be measured show `?` and are
+left out of the total. `dangerous` actions are left out unless you pass
+`--dangerous`, which can turn a partial purge into a full one. Plugins that do not apply here (wrong
 platform, tool not installed, or tool not running) are listed as skipped.
 """
 
@@ -55,8 +57,8 @@ nothing to clean are skipped. Then it asks:
    warning that data may be lost for good.
 
 Then it runs the approved actions. A failed action is reported and the run
-continues with the next one. At the end it measures again and prints the space
-freed. Actions that need sudo say so before they run.
+continues with the next one. At the end it measures again and prints a table
+of each tool's cache size before and after, and the space freed. Actions that need sudo say so before they run.
 
 Without an interactive terminal (or with `--json`), purger cannot prompt:
 `safe` actions run only with `--yes`, `caution` and `dangerous` actions are

@@ -14,7 +14,6 @@ from typing import Annotated, Any
 from cyclopts import App, CycloptsError, Parameter
 from nclutils import pp
 from nclutils.ask import choose_one_from_list
-from nclutils.strings import human_size
 
 from purger import __version__
 from purger.clean_flow import CleanOptions, plan_clean
@@ -33,6 +32,7 @@ from purger.output import (
     clean_document,
     error_document,
     info_document,
+    render_results,
     render_table,
 )
 from purger.plugin import Plugin, Tier
@@ -43,7 +43,6 @@ from purger.reports import (
     SkippedPlugin,
     SkipReason,
     Status,
-    sum_known,
 )
 from purger.runner import sudo_ready
 from purger.sizing import measure_plugin
@@ -250,17 +249,22 @@ def _report_skipped(skipped: list[SkippedPlugin], names: Sequence[str]) -> None:
         pp.info(f"Skipped: {listing}", style="dim")
 
 
-def _print_table(reports: list[PluginReport], *, show_status: bool = False) -> None:
+def _print_table(reports: list[PluginReport]) -> None:
     if reports:
-        pp.console().print(render_table(reports, show_status=show_status))
+        pp.console().print(render_table(reports))
     else:
         pp.info("No supported caches found on this machine.")
 
 
-def _labeled(reports: list[PluginReport]) -> Iterable[tuple[str, ActionReport]]:
+def _labeled(
+    reports: list[PluginReport], *, separator: str = "/"
+) -> Iterable[tuple[str, ActionReport]]:
     for plugin_report in reports:
         for action_report in plugin_report.actions:
-            yield f"{plugin_report.plugin.name}/{action_report.action.name}", action_report
+            yield (
+                f"{plugin_report.plugin.name}{separator}{action_report.action.name}",
+                action_report,
+            )
 
 
 def _warn_not_run(reports: list[PluginReport]) -> None:
@@ -301,22 +305,10 @@ def _print_results(reports: list[PluginReport], ran: list[PluginReport]) -> None
     if not ran:
         pp.info("Nothing was cleaned.")
         return
-    _print_table(reports, show_status=True)
-    for label, report in _labeled(reports):
+    pp.console().print(render_results(ran))
+    for label, report in _labeled(reports, separator=": "):
         if report.status is Status.FAILED:
             pp.error(f"{label} failed: {report.error}")
-    total = sum_known(r.freed_bytes for r in ran)
-    if total is not None:
-        pp.success(
-            f"Freed {human_size(total)}",
-            details=[
-                f"{r.plugin.name}: {human_size(r.freed_bytes)}"
-                for r in ran
-                if r.freed_bytes is not None
-            ],
-        )
-    else:
-        pp.info("Freed space could not be measured.")
 
 
 def _show_clean(scan: _Scan, *, json_output: bool, show: Callable[[], None]) -> None:

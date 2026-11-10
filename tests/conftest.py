@@ -14,7 +14,12 @@ def make_action(**overrides: Any) -> Action:
     The overrides are typed Any because they are forwarded to the dataclass, which
     validates each field itself.
     """
-    fields: dict[str, Any] = {"name": "a", "tier": Tier.SAFE, "command": ("true",)}
+    fields: dict[str, Any] = {
+        "name": "a",
+        "tier": Tier.SAFE,
+        "help": "Remove things.",
+        "command": ("true",),
+    }
     fields.update(overrides)
     return Action(**fields)
 
@@ -24,6 +29,12 @@ def make_plugin(**overrides: Any) -> Plugin:
     fields: dict[str, Any] = {"name": "p", "description": "d", "actions": (make_action(),)}
     fields.update(overrides)
     return Plugin(**fields)
+
+
+def table_row(text: str, name: str) -> list[str]:
+    """Return the stripped cells of the first rendered table row that names a plugin."""
+    line = next(line for line in text.splitlines() if f" {name} " in line)
+    return [cell.strip() for cell in line.split("\u2502")[1:-1]]
 
 
 @pytest.fixture(name="make_action")

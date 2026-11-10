@@ -13,7 +13,7 @@ from purger.cli import ExitCode, app, confirm, main
 from purger.measure_display import MeasureDisplay
 from purger.plugin import Plugin, Tier
 from purger.reports import ActionReport, PluginReport, SkipReason, Status
-from tests.conftest import make_action, make_plugin
+from tests.conftest import make_action, make_plugin, table_row
 
 _SIZE = 100
 
@@ -89,7 +89,7 @@ def test_info_json_is_single_document(
 def test_info_human_prints_table(
     patch_registry: Callable[..., None], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Verify info without --json prints the table with plugin and action names."""
+    """Verify info without --json prints a row per tool and never the action names."""
     # Given
     patch_registry(make_plugin(name="alpha", actions=(make_action(name="prune"),)))
 
@@ -100,7 +100,8 @@ def test_info_human_prints_table(
     out = capsys.readouterr().out
     assert code == ExitCode.OK
     assert "alpha" in out
-    assert "prune" in out
+    assert "Partial" in out
+    assert "prune" not in out
 
 
 @pytest.mark.parametrize("command", ["info", "clean"])
@@ -384,7 +385,7 @@ def test_clean_interactive_yes_still_confirms_caution_and_notes_sudo(
     err = capsys.readouterr().err
     assert code == ExitCode.OK
     assert ask.call_count == 1
-    assert "alpha/risky" in ask.call_args.args[1]
+    assert ask.call_args.args[1].startswith("alpha: ")
     assert [c.args[0].action.name for c in run_action.call_args_list] == ["sudo-safe"]
     assert "alpha/sudo-safe" in err
     assert "sudo" in err
@@ -487,10 +488,10 @@ def test_main_usage_error_without_json_exits_2(
     assert "schema_version" not in captured.out
 
 
-def test_clean_human_reports_freed_per_plugin(
+def test_clean_human_prints_results_table(
     mocker: MockerFixture, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Verify a human clean run prints the space freed per plugin and in total."""
+    """Verify a human clean run ends with each tool's size before and after, and the space freed."""
     # Given
     plugin = make_plugin(name="alpha")
     mocker.patch("purger.cli.discover_plugins", autospec=True, return_value={plugin.name: plugin})
@@ -505,8 +506,45 @@ def test_clean_human_reports_freed_per_plugin(
     # Then
     out = capsys.readouterr().out
     assert code == ExitCode.OK
-    assert "alpha: 60 B" in out
-    assert "Freed 60 B" in out
+    for header in ("Before", "After", "Freed"):
+        assert header in out
+    results = out[out.index("Before") :]
+    assert table_row(results, "alpha") == ["alpha", "100 B", "40 B", "60 B"]
+    assert "Freed 60 B" not in out
+    assert "Status" not in out
+
+
+def test_clean_human_lists_failures_under_table(
+    mocker: MockerFixture, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Verify a tool with one success and one failure gets a results row and a failure line."""
+    # Given a tool whose second action fails
+    plugin = make_plugin(name="alpha", actions=(make_action(name="one"), make_action(name="two")))
+    mocker.patch("purger.cli.discover_plugins", autospec=True, return_value={plugin.name: plugin})
+    before = _fake_measure(plugin, include_dangerous=False)
+    after = PluginReport(plugin=plugin, footprint_bytes=50, actions=[])
+    _patch_measure(mocker, side_effect=[before, after])
+
+    def run(report: ActionReport, *, home: object, verbose: bool, interactive: bool) -> None:
+        if report.action.name == "two":
+            report.status = Status.FAILED
+            report.error = "boom"
+        else:
+            report.status = Status.DONE
+
+    mocker.patch("purger.execution.run_action", autospec=True, side_effect=run)
+
+    # When
+    code = _run("clean", "--yes")
+
+    # Then
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+    assert code == ExitCode.ACTION_FAILED
+    results = captured.out[captured.out.index("Before") :]
+    assert " alpha " in results
+    assert "alpha: two failed: boom" in output
+    assert "alpha/two failed" not in output
 
 
 def test_clean_json_stdout_is_only_the_document(

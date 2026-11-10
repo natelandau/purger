@@ -7,12 +7,11 @@ from nclutils.strings import human_size
 from rich.markup import escape
 from rich.table import Table
 
-from purger.plugin import Tier
 from purger.reports import ActionReport, PluginReport, SkippedPlugin, sum_known
 
 SCHEMA_VERSION = 1
 
-_TIER_STYLES = {Tier.SAFE: "green", Tier.CAUTION: "yellow", Tier.DANGEROUS: "red"}
+_CHECK = "\u2713"
 
 
 def grand_total(reports: list[PluginReport]) -> int | None:
@@ -28,48 +27,94 @@ def grand_total(reports: list[PluginReport]) -> int | None:
 
 
 def _size_text(size: int | None) -> str:
-    return "-" if size is None else human_size(size)
+    return "?" if size is None else human_size(size)
 
 
-def render_table(reports: list[PluginReport], *, show_status: bool = False) -> Table:
-    """Build the human-readable table of plugins and their actions.
+def is_partial(report: PluginReport) -> bool:
+    """Report whether a clean would free only part of a tool's measured size.
+
+    A tool is exact when every included action has a known size, or when the
+    known sizes cover the whole footprint, such as a full-wipe action under
+    `--dangerous`. The report holds only the actions this run includes.
+
+    Args:
+        report: The measured plugin.
+
+    Returns:
+        bool: True when the size shown is more than a clean is known to free.
+    """
+    sizes = [action.size_bytes for action in report.actions]
+    if None not in sizes:
+        return False
+    known = sum_known(sizes)
+    if report.footprint_bytes is None or known is None:
+        return True
+    return known < report.footprint_bytes
+
+
+def _largest_first(size: int | None, name: str) -> tuple[bool, int, str]:
+    """Sort key putting the largest size first, unknown sizes last, and ties by name."""
+    return (size is None, -(size or 0), name)
+
+
+def render_table(reports: list[PluginReport]) -> Table:
+    """Build the table of tools and their cache sizes, largest first.
+
+    Action names and tiers stay out of this table so users never need to know
+    which commands purger runs inside each tool.
 
     Args:
         reports: Plugin reports to show.
-        show_status: Add a Status column with each action's outcome.
 
     Returns:
         A rich table ready to print.
     """
+    rows = sorted(
+        ((report, is_partial(report)) for report in reports),
+        key=lambda row: _largest_first(row[0].footprint_bytes, row[0].plugin.name),
+    )
+    any_partial = any(partial for _, partial in rows)
     table = Table(show_footer=True, expand=False)
-    table.add_column("Name", footer="Found in caches")
-    table.add_column("Tier")
+    table.add_column("Cache", footer="Total")
     table.add_column("Size", justify="right", footer=_size_text(grand_total(reports)))
-    if show_status:
-        table.add_column("Status")
+    table.add_column("Partial\npurge", justify="center", footer=_CHECK if any_partial else "")
     table.add_column("Description")
-
-    blanks = [""] if show_status else []
-    for report in reports:
+    for report, partial in rows:
         table.add_row(
             f"[bold]{escape(report.plugin.name)}[/bold]",
-            "",
-            f"[bold]{_size_text(report.footprint_bytes)}[/bold]",
-            *blanks,
+            _size_text(report.footprint_bytes),
+            _CHECK if partial else "",
             escape(report.plugin.description),
-            end_section=not report.actions,
         )
-        for index, action in enumerate(report.actions):
-            style = _TIER_STYLES[action.action.tier]
-            status = [escape(str(action.status or ""))] if show_status else []
-            table.add_row(
-                f"  {escape(action.action.name)}",
-                f"[{style}]{action.action.tier.value}[/{style}]",
-                _size_text(action.size_bytes),
-                *status,
-                escape(action.action.help),
-                end_section=index == len(report.actions) - 1,
-            )
+    return table
+
+
+def render_results(ran: list[PluginReport]) -> Table:
+    """Build the table of each tool's cache size before and after a clean.
+
+    Args:
+        ran: Plugin reports for the tools where at least one action ran.
+
+    Returns:
+        A rich table ready to print.
+    """
+    # Freed is known only when both sizes are, so these totals agree with each other.
+    measured = [r for r in ran if r.freed_bytes is not None]
+    table = Table(show_footer=True, expand=False)
+    table.add_column("Cache", footer="Total")
+    for title, values in (
+        ("Before", [r.footprint_bytes for r in measured]),
+        ("After", [r.after_bytes for r in measured]),
+        ("Freed", [r.freed_bytes for r in measured]),
+    ):
+        table.add_column(title, justify="right", footer=_size_text(sum_known(values)))
+    for report in sorted(ran, key=lambda r: _largest_first(r.freed_bytes, r.plugin.name)):
+        table.add_row(
+            f"[bold]{escape(report.plugin.name)}[/bold]",
+            _size_text(report.footprint_bytes),
+            _size_text(report.after_bytes),
+            _size_text(report.freed_bytes),
+        )
     return table
 
 
