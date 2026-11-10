@@ -9,7 +9,25 @@ from nclutils.sh import CompletedCommand, ShellCommandNotFoundError
 from pytest_mock import MockerFixture
 
 from purger.output import is_partial
-from purger.plugins import apt, brew, docker, mise, npm, pip, pre_commit, yarn
+from purger.plugins import (
+    ansible,
+    apt,
+    brew,
+    conda,
+    docker,
+    maestro,
+    mise,
+    npm,
+    pacman,
+    pip,
+    pnpm,
+    podman,
+    pre_commit,
+    rip2,
+    thumbnails,
+    trash,
+    yarn,
+)
 from purger.plugins.brew import _parse_dry_run
 from purger.plugins.npm import _explain_npx_failure
 from purger.sizing import disk_usage, measure_plugin
@@ -298,3 +316,373 @@ def test_explain_npx_failure_hints_only_on_enotempty(stderr: str, *, has_hint: b
     assert (hint is not None) is has_hint
     if hint is not None:
         assert "npx" in hint
+
+
+def test_trash_available_when_readable(tmp_path: Path, mocker: MockerFixture) -> None:
+    """Verify the trash plugin applies when the Trash folder can be listed."""
+    # Given
+    (tmp_path / ".Trash").mkdir()
+    mocker.patch("purger.plugins.trash.invoking_home", return_value=tmp_path)
+
+    # When / Then
+    assert trash._is_available() is True
+
+
+def test_trash_available_when_missing(tmp_path: Path, mocker: MockerFixture) -> None:
+    """Verify a home without a Trash folder counts as available with nothing to clean."""
+    # Given
+    mocker.patch("purger.plugins.trash.invoking_home", return_value=tmp_path)
+
+    # When / Then
+    assert trash._is_available() is True
+
+
+def test_trash_unavailable_without_permission(tmp_path: Path, mocker: MockerFixture) -> None:
+    """Verify a Trash that macOS refuses to list reports unavailable instead of empty."""
+    # Given
+    mocker.patch("purger.plugins.trash.invoking_home", return_value=tmp_path)
+    mocker.patch.object(Path, "iterdir", side_effect=PermissionError)
+
+    # When / Then
+    assert trash._is_available() is False
+
+
+_RIP2_HELP = (
+    "Subcommands:\n"
+    "  completions  Generate shell completions file\n"
+    "  graveyard    Print the graveyard path\n"
+)
+_OLD_RIP_HELP = "rip: a safe and ergonomic alternative to rm\n    -d, --decompose\n"
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "expected"),
+    [(0, _RIP2_HELP, True), (0, _OLD_RIP_HELP, False), (1, _RIP2_HELP, False)],
+    ids=["rip2", "old-rip", "help-fails"],
+)
+def test_rip2_available_only_for_rip2(
+    returncode: int, stdout: str, expected: bool, mocker: MockerFixture
+) -> None:
+    """Verify the plugin applies only when `rip` is rip2, since the original rip would bury a file named graveyard."""
+    # Given
+    mocker.patch(
+        "purger.plugins.rip2.run_command",
+        autospec=True,
+        return_value=_completed(returncode=returncode, stdout=stdout),
+    )
+    assert rip2.PLUGIN.is_available is not None
+
+    # When / Then
+    assert rip2.PLUGIN.is_available() is expected
+
+
+def test_rip2_measures_printed_graveyard(tmp_path: Path, mocker: MockerFixture) -> None:
+    """Verify the footprint is the size of the directory `rip graveyard` prints."""
+    # Given
+    (tmp_path / "buried").write_bytes(b"x" * 10_000)
+    mocker.patch(
+        "purger.sizing.run_command", autospec=True, return_value=_completed(stdout=f"{tmp_path}\n")
+    )
+
+    # When
+    report = measure_plugin(rip2.PLUGIN, include_dangerous=False)
+
+    # Then
+    assert report.footprint_bytes == disk_usage([tmp_path])
+
+
+@pytest.mark.parametrize(
+    ("leftover", "cmdline", "expected"),
+    [
+        (True, ["/usr/bin/python3", "/Users/me/.local/bin/purger", "clean", "ansible"], True),
+        (False, ["/bin/zsh"], False),
+        (True, ["/usr/bin/python3", "/Users/me/.local/bin/ansible-playbook", "site.yml"], False),
+    ],
+    ids=["idle-with-leftovers", "nothing-to-clean", "ansible-running"],
+)
+def test_ansible_available_only_when_idle_with_leftovers(
+    leftover: bool,
+    cmdline: list[str],
+    expected: bool,
+    tmp_path: Path,
+    mocker: MockerFixture,
+) -> None:
+    """Verify the plugin applies only with leftovers to clean and no ansible process using them."""
+    # Given
+    if leftover:
+        stale = tmp_path / ".ansible" / "tmp" / "ansible-tmp-1747399837.59-86917-2270"
+        stale.mkdir(parents=True)
+    mocker.patch("purger.sizing.invoking_home", return_value=tmp_path)
+    mocker.patch.object(ansible, "_TMP_PATHS", ("~/.ansible/tmp/*",))
+    mocker.patch.object(ansible, "_GALAXY_PATHS", ("~/.ansible/galaxy_cache/*",))
+    process = mocker.Mock(info={"cmdline": cmdline})
+    mocker.patch("purger.plugins._shared.psutil.process_iter", return_value=[process])
+    assert ansible.PLUGIN.is_available is not None
+
+    # When / Then
+    assert ansible.PLUGIN.is_available() is expected
+
+
+@pytest.mark.parametrize(
+    "cmdline",
+    [
+        ["/usr/bin/python3", "/Users/me/.local/bin/ansible-playbook", "site.yml"],
+        ["/opt/homebrew/bin/ansible", "all", "-m", "ping"],
+        ["ansible-galaxy", "install", "-r", "requirements.yml"],
+    ],
+)
+def test_ansible_command_detected(cmdline: list[str]) -> None:
+    """Verify ansible commands count as running however they were started."""
+    # Given / When / Then
+    assert ansible._is_ansible_command(cmdline) is True
+
+
+@pytest.mark.parametrize(
+    "cmdline",
+    [
+        ["/usr/bin/python3", "/Users/me/.local/bin/purger", "clean", "ansible"],
+        ["vim", "/Users/me/.ansible/notes"],
+        ["/usr/bin/python3", "/Users/me/.local/share/ansible/script.py"],
+        [],
+    ],
+)
+def test_ansible_command_not_detected(cmdline: list[str]) -> None:
+    """Verify purger itself, unrelated commands, and unreadable argv do not count as ansible."""
+    # Given / When / Then
+    assert ansible._is_ansible_command(cmdline) is False
+
+
+@pytest.mark.parametrize(
+    ("ansible_home", "expected"),
+    [
+        (None, ("~/.ansible",)),
+        ("", ("~/.ansible",)),
+        ("~/.ansible/", ("~/.ansible",)),
+        ("/Users/me/.local/share/ansible", ("~/.ansible", "/Users/me/.local/share/ansible")),
+    ],
+)
+def test_ansible_homes_follow_ansible_home(
+    ansible_home: str | None, expected: tuple[str, ...], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify an ANSIBLE_HOME is cleaned alongside the default, which is listed once."""
+    # Given
+    monkeypatch.delenv("ANSIBLE_HOME", raising=False)
+    if ansible_home is not None:
+        monkeypatch.setenv("ANSIBLE_HOME", ansible_home)
+
+    # When / Then
+    assert ansible._ansible_homes() == expected
+
+
+def test_pnpm_stale_metadata_dirs_keep_only_listed_cache_folders(tmp_path: Path) -> None:
+    """Verify only listed folders that exist inside the cache are sized, not the summary line."""
+    # Given
+    (tmp_path / "v11" / "metadata").mkdir(parents=True)
+    (tmp_path / "v11" / "metadata-full").mkdir(parents=True)
+    output = (
+        "Dry run: 3 directories would be deleted.\n"
+        "v11/metadata/https%3A+registry.npmjs.org\n"
+        "v11/metadata\n"
+        "v11/metadata-full\n"
+        "../outside\n"
+    )
+    (tmp_path.parent / "outside").mkdir(exist_ok=True)
+
+    # When
+    dirs = pnpm._stale_metadata_dirs(output, cache_dir=tmp_path)
+
+    # Then
+    root = tmp_path.resolve()
+    assert dirs == [root / "v11" / "metadata", root / "v11" / "metadata-full"]
+
+
+def test_pnpm_metadata_prune_measures_listed_folders(tmp_path: Path, mocker: MockerFixture) -> None:
+    """Verify the metadata-prune size is the folders the dry run lists under the cache path."""
+    # Given
+    stale = tmp_path / "v11" / "metadata"
+    stale.mkdir(parents=True)
+    (stale / "pkg.json").write_bytes(b"x" * 10_000)
+    current = tmp_path / "v12" / "metadata"
+    current.mkdir(parents=True)
+    (current / "pkg.json").write_bytes(b"x" * 50_000)
+    mocker.patch(
+        "purger.plugins.pnpm.run_command",
+        autospec=True,
+        side_effect=[
+            _completed(stdout=f"{tmp_path}\n"),
+            _completed(stdout="Dry run: 1 directories would be deleted.\nv11/metadata\n"),
+        ],
+    )
+    action = next(a for a in pnpm.PLUGIN.actions if a.name == "metadata-prune")
+    assert action.size is not None
+
+    # When
+    size = action.size()
+
+    # Then
+    assert size == disk_usage([stale])
+
+
+@pytest.mark.parametrize(
+    ("xdg_state_home", "expected"),
+    [
+        (None, ("~/.maestro/tests/*", "~/.local/state/maestro/tests/*")),
+        ("/Users/me/state/", ("~/.maestro/tests/*", "/Users/me/state/maestro/tests/*")),
+    ],
+)
+def test_maestro_output_follows_xdg_state_home(
+    xdg_state_home: str | None, expected: tuple[str, ...], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify both the documented and the XDG test output folders are cleaned."""
+    # Given
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+    if xdg_state_home is not None:
+        monkeypatch.setenv("XDG_STATE_HOME", xdg_state_home)
+
+    # When / Then
+    assert maestro._test_output_patterns() == expected
+
+
+@pytest.mark.parametrize(
+    ("has_output", "cmdline", "expected"),
+    [
+        (True, ["/bin/zsh"], True),
+        (False, ["/bin/zsh"], False),
+        (True, ["/usr/bin/java", "-classpath", "/x/lib/*", "maestro.cli.AppKt", "test"], False),
+        (True, None, True),
+    ],
+    ids=["idle-with-output", "nothing-to-clean", "maestro-running", "unreadable-argv"],
+)
+def test_maestro_available_only_when_idle_with_output(
+    has_output: bool,
+    cmdline: list[str] | None,
+    expected: bool,
+    tmp_path: Path,
+    mocker: MockerFixture,
+) -> None:
+    """Verify the plugin applies only with output to clean and no Maestro run writing to it."""
+    # Given
+    if has_output:
+        (tmp_path / ".maestro" / "tests" / "2026-11-10_041643").mkdir(parents=True)
+    mocker.patch("purger.sizing.invoking_home", return_value=tmp_path)
+    mocker.patch.object(maestro, "_TEST_OUTPUT_PATHS", ("~/.maestro/tests/*",))
+    process = mocker.Mock(info={"cmdline": cmdline})
+    mocker.patch("purger.plugins._shared.psutil.process_iter", return_value=[process])
+    assert maestro.PLUGIN.is_available is not None
+
+    # When / Then
+    assert maestro.PLUGIN.is_available() is expected
+
+
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        (
+            "==> finished dry run: 3 candidates (disk space saved: 120.5 MiB)\n",
+            int(120.5 * 1024**2),
+        ),
+        ("==> finished dry run: 1 candidates (disk space saved: 812 KiB)\n", 812 * 1024),
+        ("==> no candidate packages found for pruning\n", 0),
+    ],
+)
+def test_pacman_reads_dry_run_savings(output: str, expected: int) -> None:
+    """Verify the paccache dry-run summary converts to bytes, and no candidates means zero."""
+    # Given / When / Then
+    assert pacman._saved_bytes(output) == expected
+
+
+def test_conda_counts_tarballs_and_unused_packages() -> None:
+    """Verify the conda size adds tarballs and unused packages, ignoring unsized parts."""
+    # Given
+    output = (
+        '{"success": true, "tarballs": {"total_size": 1000, "pkg_sizes": {}}, '
+        '"packages": {"total_size": 2500}, "index_cache": {"files": ["/x"]}, "logfiles": []}'
+    )
+
+    # When / Then
+    assert conda._reclaimable_bytes(output) == 3500
+
+
+def test_conda_size_without_package_sections_is_zero() -> None:
+    """Verify a report that holds only unsized parts measures as zero."""
+    # Given / When / Then
+    assert conda._reclaimable_bytes('{"success": true, "logfiles": []}') == 0
+
+
+_PODMAN_DF = (
+    '[{"Type":"Images","RawReclaimable":900,"Reclaimable":"900B (7%)"},'
+    '{"Type":"Containers","RawReclaimable":100,"Reclaimable":"100B"},'
+    '{"Type":"Local Volumes","RawReclaimable":5000,"Reclaimable":"5kB"}]'
+)
+
+
+@pytest.mark.parametrize(
+    ("types", "expected"),
+    [(frozenset({"Images", "Containers"}), 1000), (frozenset({"Local Volumes"}), 5000)],
+)
+def test_podman_sums_raw_reclaimable(types: frozenset[str], expected: int) -> None:
+    """Verify podman sizes come from the integer RawReclaimable field of the chosen rows."""
+    # Given / When / Then
+    assert podman._reclaimable_from(_PODMAN_DF, types=types) == expected
+
+
+def test_podman_unavailable_when_info_fails(mocker: MockerFixture) -> None:
+    """Verify podman is skipped when it does not answer, such as a stopped machine on macOS."""
+    # Given
+    mocker.patch(
+        "purger.runner.run_command", autospec=True, return_value=_completed(returncode=125)
+    )
+    assert podman.PLUGIN.is_available is not None
+
+    # When / Then
+    assert podman.PLUGIN.is_available() is False
+
+
+@pytest.mark.parametrize(
+    ("xdg_data_home", "expected"),
+    [
+        (
+            None,
+            (
+                "~/.local/share/Trash/files/*",
+                "~/.local/share/Trash/info/*",
+                "~/.local/share/Trash/directorysizes",
+            ),
+        ),
+        (
+            "/Users/me/data",
+            (
+                "/Users/me/data/Trash/files/*",
+                "/Users/me/data/Trash/info/*",
+                "/Users/me/data/Trash/directorysizes",
+            ),
+        ),
+    ],
+)
+def test_linux_trash_empties_contents_not_folders(
+    xdg_data_home: str | None, expected: tuple[str, ...], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify the Linux Trash keeps its files and info folders and follows XDG_DATA_HOME."""
+    # Given
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    if xdg_data_home is not None:
+        monkeypatch.setenv("XDG_DATA_HOME", xdg_data_home)
+
+    # When / Then
+    assert trash._trash_paths("linux") == expected
+
+
+def test_macos_trash_empties_home_trash() -> None:
+    """Verify the macOS Trash is the home .Trash folder."""
+    # Given / When / Then
+    assert trash._trash_paths("darwin") == ("~/.Trash/*",)
+
+
+def test_thumbnails_clean_each_size_folder() -> None:
+    """Verify the thumbnail action removes the size folders inside the thumbnail cache."""
+    # Given
+    action = thumbnails.PLUGIN.actions[0]
+
+    # When / Then
+    assert len(action.paths) == 1
+    assert action.paths[0].endswith("/thumbnails/*")
