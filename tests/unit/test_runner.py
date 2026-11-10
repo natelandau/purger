@@ -292,6 +292,18 @@ def test_describe_appends_trimmed_stderr(stderr: str, expected: str) -> None:
     assert message == expected
 
 
+def test_describe_does_not_repeat_stderr_in_built_message() -> None:
+    """Verify stderr appears once when the error message was built from the result."""
+    # Given an error whose message nclutils built from the result
+    exc = ShellCommandFailedError(result=_completed(stderr="disk full"))
+
+    # When
+    message = _describe_failure(exc)
+
+    # Then
+    assert message.count("disk full") == 1
+
+
 def test_sudo_ready_false_on_timeout(mocker: MockerFixture) -> None:
     """Verify sudo_ready is False when the probe times out."""
     # Given

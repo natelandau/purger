@@ -26,7 +26,8 @@ def _describe_failure(exc: Exception) -> str:
     message = str(exc)
     if isinstance(exc, ShellCommandFailedError) and exc.result is not None:
         stderr = exc.result.stderr.strip()
-        if stderr:
+        # A message nclutils builds from the result already carries stderr.
+        if stderr and stderr not in message:
             message = f"{message}: {stderr}"
     return message
 
