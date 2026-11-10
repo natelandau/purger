@@ -15,6 +15,10 @@
 - Every path deletion goes through `safety.delete_path`. Do not delete files anywhere else.
 - In `--json` mode stdout carries exactly one JSON document. Warnings go to stderr, and tool output must not reach stdout.
 
+## Plugins
+
+Start a new plugin from `src/purger/plugins/_template.py`, which documents every `Plugin` and `Action` field. A new field on either class must be documented in the template, and `tests/unit/test_plugin_template.py` fails until it is. Discovery skips modules whose names start with `_`.
+
 ## Public contracts
 
 The JSON document shape (`schema_version: 1`), the status values, the exit codes, and the CLI flags are public. A change to any of them is a breaking change.

@@ -136,6 +136,8 @@
             "PLW0108", # Lambda may be unnecessary; consider inlining inner function
             "S101",
             "SLF001",  # Calling private method
+        ], "src/purger/plugins/_template.py" = [
+            "ERA001", # Commented-out alternatives show fields the template does not set
         ] }
         select = ["ALL"]
         unfixable = [

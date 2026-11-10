@@ -71,20 +71,22 @@ The tests live in `tests/unit/`. Each test file matches a module in `src/purger/
 
 ## Add a plugin
 
-Each plugin is one Python file in `src/purger/plugins/`. The file defines a module-level `PLUGIN`, which is a `Plugin` object. purger finds the file without a registration step, and the help page lists the plugin automatically.
+Each plugin is one Python file in `src/purger/plugins/`. The file defines a module-level `PLUGIN`, which is a `Plugin` object. purger finds the file without a registration step, and the help page lists the plugin automatically. purger skips each module whose name starts with an underscore.
+
+The file `src/purger/plugins/_template.py` is the reference for plugins. It sets or names each `Plugin` and `Action` field, with a comment that tells what the field does and when to use it. A test fails when a field has no entry in the template, so the template always matches the code.
 
 To add a plugin, do these steps:
 
-1. Copy a plugin that is similar to the one you need. `uv.py` runs tool commands. `xcode.py` deletes directories by path.
-2. Give the plugin and each action a lowercase name with hyphens. The file name must match the plugin name, with underscores for hyphens (`pre_commit.py` for `pre-commit`).
-3. Give each action a tier. Use `safe` only when the tool rebuilds the cache cheaply and automatically.
-4. Write a `help` text for each action that tells the user what a rebuild costs.
-5. If the plugin has two or more command actions, give the plugin its own `size`, `size_cmd`, or `paths`. Their sizes can overlap, so purger cannot add them together. The exception is a plugin where each command action measures exactly what it frees, such as `go`.
-6. When a tool prints its cache directory (`npm config get cache`, `go env GOCACHE`), use that command as the `size_cmd` with `printed_dir_usage` as the parser, so purger measures the directory the tool really uses.
-7. In `tests/unit/test_plugin_definitions.py`, add the plugin name to `test_discover_plugins_finds_builtin_set` and add each action to `_EXPECTED_ACTIONS`.
-8. Run `uv run purger info` and `uv run purger --help` to make sure that the plugin appears.
+1. Copy `_template.py` to a file named after the plugin, with underscores for hyphens (`pre_commit.py` for `pre-commit`).
+2. Replace the module docstring with one line that names the tool.
+3. Change the plugin fields and the actions to match the tool. Delete each field and action that the tool does not need.
+4. If the plugin has two or more command actions, give the plugin its own `size`, `size_cmd`, or `paths`. Their sizes can overlap, so purger cannot add them together. The exception is a plugin where each command action measures exactly what it frees, such as `go`.
+5. In `tests/unit/test_plugin_definitions.py`, add the plugin name to `test_discover_plugins_finds_builtin_set` and add each action to `_EXPECTED_ACTIONS`.
+6. Run `uv run purger info` and `uv run purger --help` to make sure that the plugin appears.
 
 A plugin must not delete anything that the user cannot rebuild, unless the action has the `dangerous` tier. A path action can delete only below your home directory. purger refuses every other path.
+
+If you add a field to `Plugin` or `Action`, document the field in `_template.py`.
 
 ## Commit messages
 
