@@ -51,6 +51,11 @@ left out of the total. `dangerous` actions are left out unless you pass
 `--dangerous`, which can turn a partial purge into a full one. Plugins that do
 not apply here (wrong platform, tool not installed, or tool not running) are
 not shown, unless you name one.
+
+With `-v`, info prints a section for each tool in place of the table, largest
+first, and the total last. Each section lists what the size holds, such as each
+project or each simulator, as a tree under the tool. `-v` shortens long names
+to fit one line. `-vv` shows full names and lists each row's paths under it.
 """
 
 CLEAN_HELP = """\
@@ -73,8 +78,11 @@ Without an interactive terminal (or with `--json`), purger cannot prompt:
 `safe` actions run only with `--yes`, `caution` and `dangerous` actions are
 declined with a warning, and sudo actions run only when sudo needs no password.
 
-`--dry-run` prints each command or path that would be cleaned, asks nothing,
-and changes nothing.
+`--dry-run` (`-n`) prints one line per action: the number of items and the size
+it would delete, or the command it would run. It asks nothing and changes
+nothing. With `-v`, `clean` prints a section for each tool in place of the
+table, with each action's rows under its name and tier, before the plan or the
+first prompt.
 """
 
 _INFO_EXIT_CODES = """\
@@ -110,6 +118,7 @@ INFO_EPILOGUE = f"""\
 - `purger info uv brew`: show only the uv and brew caches.
 - `purger info --json`: the same report as one JSON document.
 - `purger info --dangerous`: also show `dangerous` actions.
+- `purger info projects -v`: list each project and the space it uses.
 
 {_INFO_EXIT_CODES}
 **JSON output** (`--json`)
@@ -117,8 +126,10 @@ INFO_EPILOGUE = f"""\
 Top-level keys: `schema_version` (always 1), `platform` (`darwin` or `linux`),
 `total_bytes`, `plugins`, and `skipped`. Each plugin has `name`, `description`,
 `footprint_bytes`, and `actions`. Each action has `name`, `tier`, `help`,
-`size_bytes`, `command` (argv list or null), `paths` (resolved paths), and
-`needs_sudo`. Each `skipped` entry has `name` and `reason` (`platform`,
+`size_bytes`, `command` (argv list or null), `paths` (resolved paths),
+`needs_sudo`, and `details`. `details` breaks the action's size into rows, such
+as one per project, and each row has `label`, `size_bytes`, `items`, and
+`paths`. Each `skipped` entry has `name` and `reason` (`platform`,
 `missing_binary`, `unavailable`, `disabled`, or `not_configured`). Sizes are integer bytes, or null when unknown.
 {_JSON_ERRORS}"""
 

@@ -81,24 +81,25 @@ Both commands accept plugin names as arguments. Without names, a command uses ev
 
 ```bash
 purger info uv brew              # measure only the uv and Homebrew caches
+purger info projects -v          # list each project and the space it uses
 purger clean xcode --dry-run     # show what would be cleaned, change nothing
 purger clean docker --dangerous  # also offer to remove unused Docker volumes
 ```
 
 These options apply to both commands:
 
-| Option        | Effect                                                                    |
-| ------------- | ------------------------------------------------------------------------- |
-| `--dangerous` | Include `dangerous` actions. Without it, purger hides them.               |
-| `--json`      | Print exactly one JSON document on stdout instead of tables and messages. |
-| `-v`, `-vv`   | Show more detail, such as the output of the tool commands.                |
+| Option        | Effect                                                                                                                                |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `--dangerous` | Include `dangerous` actions. Without it, purger hides them.                                                                           |
+| `--json`      | Print exactly one JSON document on stdout instead of tables and messages.                                                             |
+| `-v`, `-vv`   | Show what each size holds, such as each project or simulator, and the output of the tool commands. `-vv` also lists each row's paths. |
 
 These options apply to `purger clean` only:
 
-| Option        | Effect                                                                               |
-| ------------- | ------------------------------------------------------------------------------------ |
-| `--dry-run`   | List the commands and paths that would run. purger asks nothing and changes nothing. |
-| `--yes`, `-y` | Skip the single prompt for `safe` actions.                                           |
+| Option            | Effect                                                                                                                        |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `--dry-run`, `-n` | Show one line per action, with the size it would delete or the command it would run. purger asks nothing and changes nothing. |
+| `--yes`, `-y`     | Skip the single prompt for `safe` actions.                                                                                    |
 
 ## Configuration
 
@@ -198,12 +199,12 @@ purger clean --help
 
 Both commands use these exit codes:
 
-| Code  | Meaning                                                                 |
-| ----- | ----------------------------------------------------------------------- |
-| `0`   | Success. This includes a run where you declined every action.           |
-| `1`   | An action that you approved failed. Only `purger clean` uses this code. |
+| Code  | Meaning                                                                                                         |
+| ----- | --------------------------------------------------------------------------------------------------------------- |
+| `0`   | Success. This includes a run where you declined every action.                                                   |
+| `1`   | An action that you approved failed. Only `purger clean` uses this code.                                         |
 | `2`   | A usage error, such as an unknown plugin name, an invalid config file or `PURGER_*` variable, or a run as root. |
-| `130` | You pressed Ctrl-C.                                                     |
+| `130` | You pressed Ctrl-C.                                                                                             |
 
 ## Contributing
 

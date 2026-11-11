@@ -13,7 +13,7 @@ from purger import cli
 from purger.cli import ExitCode, app, confirm, main
 from purger.config import Config, PluginSettings
 from purger.measure_display import MeasureDisplay
-from purger.plugin import Plugin, Setting, Tier
+from purger.plugin import Detail, Plugin, Setting, Tier
 from purger.reports import ActionReport, PluginReport, SkippedPlugin, SkipReason, Status
 from tests.conftest import make_action, make_plugin, table_row
 
@@ -21,11 +21,25 @@ _SIZE = 100
 
 
 def _fake_measure(
-    plugin: Plugin, *, include_dangerous: bool, settings: PluginSettings
+    plugin: Plugin, *, include_dangerous: bool, settings: PluginSettings, with_details: bool = False
 ) -> PluginReport:
-    """Measure every action as a fixed size, honoring the DANGEROUS filter."""
+    """Measure every action as a fixed size, honoring the DANGEROUS filter.
+
+    A path action resolves three paths, and with details each action gets one row.
+    """
     actions = [
-        ActionReport(action=action, size_bytes=_SIZE, resolved_paths=[])
+        ActionReport(
+            action=action,
+            size_bytes=_SIZE,
+            resolved_paths=(
+                [Path(f"/fake/{action.name}/{i}") for i in range(3)]
+                if action.command is None
+                else []
+            ),
+            details=[Detail(label=f"row-of-{action.name}", size_bytes=_SIZE)]
+            if with_details
+            else [],
+        )
         for action in plugin.actions
         if include_dangerous or action.tier is not Tier.DANGEROUS
     ]
@@ -765,7 +779,7 @@ def test_measure_keeps_plugin_order_when_plugins_finish_out_of_order(
     beta_started = threading.Event()
 
     def measure(
-        plugin: Plugin, *, include_dangerous: bool, settings: PluginSettings
+        plugin: Plugin, *, include_dangerous: bool, settings: PluginSettings, with_details: bool
     ) -> PluginReport:
         if plugin.name == "alpha":
             assert beta_started.wait(timeout=5)
@@ -992,3 +1006,187 @@ def test_measure_does_not_prepare_a_plugin_that_is_unavailable() -> None:
     # Then
     assert scan.skipped == [SkippedPlugin(name="alpha", reason=SkipReason.UNAVAILABLE)]
     assert calls == []
+
+
+def test_info_verbose_prints_detail_rows(
+    patch_registry: Callable[..., None], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Verify info -v breaks each plugin down into its rows."""
+    # Given
+    patch_registry(make_plugin(name="alpha", actions=(make_action(name="prune"),)))
+
+    # When
+    code = _run("info", "-v")
+
+    # Then
+    assert code == ExitCode.OK
+    assert "row-of-prune" in capsys.readouterr().out
+
+
+def test_info_without_verbose_skips_detail_measurement(
+    patch_registry: Callable[..., None], mocker: MockerFixture
+) -> None:
+    """Verify a plain info does no detail work."""
+    # Given
+    plugin = make_plugin(name="alpha")
+    mocker.patch("purger.cli.discover_plugins", autospec=True, return_value={"alpha": plugin})
+    measure = _patch_measure(mocker, side_effect=_fake_measure)
+
+    # When
+    _run("info")
+
+    # Then
+    assert measure.call_args.kwargs["with_details"] is False
+
+
+def test_clean_dry_run_prints_one_summary_line_per_action(
+    patch_registry: Callable[..., None], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Verify the dry run sums up a path action instead of listing every path."""
+    # Given a path action that resolves three paths
+    patch_registry(
+        make_plugin(name="alpha", actions=(make_action(name="files", command=None, paths=("/x",)),))
+    )
+
+    # When
+    code = _run("clean", "--dry-run")
+
+    # Then
+    out = capsys.readouterr().out
+    assert code == ExitCode.OK
+    assert out.count("would delete 3 items") == 1
+    assert "/fake/" not in out
+    assert "row-of-files" not in out
+
+
+def test_clean_dry_run_verbose_lists_rows(
+    patch_registry: Callable[..., None], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Verify the dry run with -v shows each action's rows."""
+    # Given
+    patch_registry(
+        make_plugin(name="alpha", actions=(make_action(name="files", command=None, paths=("/x",)),))
+    )
+
+    # When
+    _run("clean", "--dry-run", "-v")
+
+    # Then
+    assert capsys.readouterr().out.count("row-of-files") == 1
+
+
+def test_clean_short_n_is_dry_run(
+    patch_registry: Callable[..., None], mocker: MockerFixture
+) -> None:
+    """Verify -n plans without running anything."""
+    # Given
+    patch_registry(make_plugin(name="alpha", actions=(make_action(name="prune"),)))
+    run_action = mocker.patch("purger.execution.run_action", autospec=True)
+
+    # When
+    code = _run("clean", "-n")
+
+    # Then
+    assert code == ExitCode.OK
+    run_action.assert_not_called()
+
+
+def test_clean_verbose_shows_detail_before_prompts(
+    patch_registry: Callable[..., None],
+    mocker: MockerFixture,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify a real clean -v shows the rows before asking anything."""
+    # Given
+    patch_registry(make_plugin(name="alpha", actions=(make_action(name="prune"),)))
+    mocker.patch.object(cli.sys.stdin, "isatty", return_value=True)
+    seen: list[str] = []
+
+    def answer(*args: object, **kwargs: object) -> str:
+        seen.append(capsys.readouterr().out)
+        return "no"
+
+    mocker.patch("purger.cli.choose_one_from_list", autospec=True, side_effect=answer)
+
+    # When
+    _run("clean", "-v")
+
+    # Then
+    assert seen
+    assert "row-of-prune" in seen[0]
+
+
+def test_info_json_includes_details_without_verbose(
+    patch_registry: Callable[..., None], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Verify agents get detail rows without passing -v."""
+    # Given
+    patch_registry(make_plugin(name="alpha", actions=(make_action(name="prune"),)))
+
+    # When
+    _run("info", "--json")
+
+    # Then
+    doc = _json(capsys)
+    assert doc["plugins"][0]["actions"][0]["details"][0]["label"] == "row-of-prune"
+
+
+def test_clean_verbose_skips_rows_of_actions_with_nothing_to_clean(
+    mocker: MockerFixture, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Verify clean -v lists only actions that have something to remove."""
+    # Given one empty action and one with data
+    plugin = make_plugin(
+        name="alpha", actions=(make_action(name="empty"), make_action(name="full"))
+    )
+    mocker.patch("purger.cli.discover_plugins", autospec=True, return_value={"alpha": plugin})
+
+    def measure(
+        plugin: Plugin, *, include_dangerous: bool, settings: PluginSettings, with_details: bool
+    ) -> PluginReport:
+        actions = [
+            ActionReport(
+                action=action,
+                size_bytes=0 if action.name == "empty" else _SIZE,
+                resolved_paths=[],
+                details=[Detail(label=f"row-of-{action.name}", size_bytes=0)],
+            )
+            for action in plugin.actions
+        ]
+        return PluginReport(plugin=plugin, footprint_bytes=_SIZE, actions=actions)
+
+    _patch_measure(mocker, side_effect=measure)
+    mocker.patch.object(cli.sys.stdin, "isatty", return_value=True)
+    mocker.patch("purger.cli.choose_one_from_list", autospec=True, return_value="no")
+
+    # When
+    _run("clean", "-v")
+
+    # Then
+    out = capsys.readouterr().out
+    assert "row-of-full" in out
+    assert "row-of-empty" not in out
+
+
+@pytest.mark.parametrize("args", [("info", "-v"), ("clean", "-n", "-v")])
+def test_verbose_replaces_table_with_sections(
+    args: tuple[str, ...],
+    patch_registry: Callable[..., None],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify -v prints a section per plugin and a total instead of the table."""
+    # Given
+    patch_registry(
+        make_plugin(name="alpha", description="alpha tool", actions=(make_action(name="prune"),))
+    )
+
+    # When
+    code = _run(*args)
+
+    # Then
+    out = capsys.readouterr().out
+    assert code == ExitCode.OK
+    assert "Cache" not in out
+    assert "alpha tool" in out
+    assert "row-of-prune" in out
+    assert "Total" in out

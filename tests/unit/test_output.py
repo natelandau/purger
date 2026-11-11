@@ -6,20 +6,24 @@ from pathlib import Path
 
 import pytest
 from nclutils.strings import human_size
-from rich.console import Console
+from rich.console import Console, RenderableType
 from rich.table import Table
 
+from purger.details import default_details
 from purger.output import (
     SCHEMA_VERSION,
+    action_summary,
     clean_document,
     error_document,
     grand_total,
     info_document,
     is_partial,
+    render_plugin_details,
     render_results,
     render_table,
+    render_total,
 )
-from purger.plugin import Tier
+from purger.plugin import Detail, Tier
 from purger.reports import ActionReport, PluginReport, SkippedPlugin, SkipReason, Status
 from tests.conftest import make_action, make_plugin, table_row
 
@@ -108,7 +112,9 @@ def test_info_document_shape() -> None:
         "command",
         "paths",
         "needs_sudo",
+        "details",
     }
+    assert action["details"] == []
     assert action["tier"] == "safe"
     assert action["command"] == ["x", "p"]
     assert action["paths"] == ["/home/u/.cache/x"]
@@ -348,3 +354,368 @@ def test_render_results_totals_only_rows_with_both_sizes() -> None:
         human_size(0),
         human_size(1_000),
     ]
+
+
+def _render(renderable: RenderableType | None, width: int = 120) -> str:
+    """Render to plain text at a fixed width."""
+    assert renderable is not None
+    console = Console(record=True, width=width)
+    console.print(renderable)
+    return console.export_text()
+
+
+def _path_report(tmp_path: Path, sizes: dict[str, int], **overrides: object) -> ActionReport:
+    """Build a measured path action whose detail rows are one per path."""
+    action = make_action(command=None, paths=(str(tmp_path / "*"),), **overrides)
+    rows = [
+        Detail(label=name, size_bytes=size, paths=(tmp_path / name,))
+        for name, size in sizes.items()
+    ]
+    return ActionReport(
+        action=action,
+        size_bytes=sum(sizes.values()),
+        resolved_paths=[tmp_path / name for name in sizes],
+        details=rows,
+    )
+
+
+def test_plugin_details_without_rows_still_shows_header() -> None:
+    """Verify a plugin with nothing to list keeps its name, size, and description."""
+    # Given
+    report = PluginReport(
+        plugin=make_plugin(name="brew", description="Homebrew downloads"),
+        footprint_bytes=2048,
+        actions=[ActionReport(action=make_action(), size_bytes=2048, resolved_paths=[])],
+    )
+
+    # When
+    text = _render(render_plugin_details(report, verbosity=1))
+
+    # Then
+    assert "brew" in text
+    assert human_size(2048) in text
+    assert "Homebrew downloads" in text
+
+
+def test_plugin_details_marks_partial_purge() -> None:
+    """Verify the header carries the mark the table's Partial purge column showed."""
+    # Given an action with an unknown size under a known footprint
+    report = PluginReport(
+        plugin=make_plugin(),
+        footprint_bytes=2048,
+        actions=[ActionReport(action=make_action(), size_bytes=None, resolved_paths=[])],
+    )
+
+    # When
+    text = _render(render_plugin_details(report, verbosity=1))
+
+    # Then
+    assert "partial purge" in text
+
+
+def test_plugin_details_by_action_groups_rows_under_each_action() -> None:
+    """Verify clean's sections put each action's rows under its name and tier."""
+    # Given two actions with rows, one of them empty
+    full = ActionReport(
+        action=make_action(name="deps", tier=Tier.CAUTION),
+        size_bytes=5,
+        resolved_paths=[],
+        details=[Detail(label="row-of-deps", size_bytes=5)],
+    )
+    empty = ActionReport(
+        action=make_action(name="caches"),
+        size_bytes=0,
+        resolved_paths=[],
+        details=[Detail(label="row-of-caches", size_bytes=0)],
+    )
+    report = PluginReport(plugin=make_plugin(), footprint_bytes=5, actions=[empty, full])
+
+    # When
+    text = _render(render_plugin_details(report, verbosity=1, by_action=True))
+
+    # Then
+    assert "deps (caution)" in text
+    assert "row-of-deps" in text
+    assert "row-of-caches" not in text
+
+
+def test_plugin_details_by_action_lists_actions_without_rows() -> None:
+    """Verify clean's sections name a command action that has a size but no rows."""
+    # Given
+    command = ActionReport(
+        action=make_action(name="prune", tier=Tier.CAUTION), size_bytes=600, resolved_paths=[]
+    )
+    report = PluginReport(plugin=make_plugin(), footprint_bytes=600, actions=[command])
+
+    # When
+    text = _render(render_plugin_details(report, verbosity=1, by_action=True))
+
+    # Then
+    assert "prune (caution)" in text
+    assert human_size(600) in text
+
+
+def test_render_total_sums_known_footprints() -> None:
+    """Verify the closing total line matches the table's total."""
+    # Given / When
+    text = _render(render_total(_reports()))
+
+    # Then
+    assert "Total" in text
+    assert human_size(2048) in text
+
+
+def test_plugin_details_header_uses_footprint_and_not_cleaned_line(tmp_path: Path) -> None:
+    """Verify rows that fall short of the footprint end with a not cleaned line."""
+    # Given a footprint larger than its one path action
+    action = _path_report(tmp_path, {"a": 400})
+    report = PluginReport(plugin=make_plugin(name="ruby"), footprint_bytes=1000, actions=[action])
+
+    # When
+    text = _render(render_plugin_details(report, verbosity=1))
+
+    # Then
+    assert "ruby" in text
+    assert human_size(1000) in text
+    assert "not cleaned" in text
+    assert human_size(600) in text
+
+
+def test_plugin_details_not_listed_when_command_action_has_size(tmp_path: Path) -> None:
+    """Verify a gap from a command action that cleans data says not listed."""
+    # Given one listed path action and one command action with a size and no rows
+    listed = _path_report(tmp_path, {"a": 400})
+    command = ActionReport(action=make_action(name="b"), size_bytes=600, resolved_paths=[])
+    report = PluginReport(plugin=make_plugin(), footprint_bytes=1000, actions=[listed, command])
+
+    # When
+    text = _render(render_plugin_details(report, verbosity=1))
+
+    # Then
+    assert "not listed" in text
+    assert "not cleaned" not in text
+
+
+def test_plugin_details_lists_every_row_at_v(tmp_path: Path) -> None:
+    """Verify -v lists every row, however many there are."""
+    # Given 17 rows
+    action = _path_report(tmp_path, {f"r{i:02}": 100 - i for i in range(17)})
+    report = PluginReport(plugin=make_plugin(), footprint_bytes=action.size_bytes, actions=[action])
+
+    # When
+    text = _render(render_plugin_details(report, verbosity=1))
+
+    # Then
+    assert all(f"r{i:02}" in text for i in range(17))
+    assert "more" not in text
+
+
+def test_plugin_details_vv_shows_full_paths(tmp_path: Path) -> None:
+    """Verify -vv lists each row's paths."""
+    # Given
+    action = _path_report(tmp_path, {"a": 1})
+    report = PluginReport(plugin=make_plugin(), footprint_bytes=1, actions=[action])
+
+    # When
+    text = _render(render_plugin_details(report, verbosity=2), width=400)
+
+    # Then
+    assert str(tmp_path / "a") in text
+
+
+def test_action_summary_counts_items_and_size(tmp_path: Path) -> None:
+    """Verify a path action summarizes as an item count and size."""
+    # Given
+    report = _path_report(tmp_path, {"a": 1024, "b": 1024})
+
+    # When / Then
+    assert action_summary(report) == f"would delete 2 items, {human_size(2048)}"
+
+
+def test_action_summary_command_with_sudo() -> None:
+    """Verify a command action summarizes as the command it runs."""
+    # Given
+    report = ActionReport(
+        action=make_action(command=("tool", "prune"), needs_sudo=True),
+        size_bytes=None,
+        resolved_paths=[],
+    )
+
+    # When / Then
+    assert action_summary(report) == "would run sudo tool prune"
+
+
+def test_detail_rows_stay_indented_when_labels_wrap(tmp_path: Path) -> None:
+    """Verify a long label or path never wraps back to the left margin."""
+    # Given a long label with a long path, rendered at 80 columns with paths
+    long = "~/Library/Developer/Xcode/iOS DeviceSupport/iPhone18,1 27.0.1 (24A446) and more"
+    row = Detail(label=long, size_bytes=7, paths=(tmp_path / ("deep" * 30),))
+    action = ActionReport(action=make_action(), size_bytes=7, resolved_paths=[], details=[row])
+    report = PluginReport(plugin=make_plugin(), footprint_bytes=7, actions=[action])
+
+    # When
+    text = _render(render_plugin_details(report, verbosity=2), width=80)
+
+    # Then the header is the only line at the margin
+    lines = [line for line in text.splitlines() if line.strip()]
+    assert all(line.startswith("  ") for line in lines[1:])
+    assert "(24A446)" in text
+
+
+def test_default_row_fits_one_line_at_80_columns(tmp_path: Path) -> None:
+    """Verify a deep default path renders as one short row, not a wrapped full path."""
+    # Given a default row for an item deep in the home folder
+    item = (
+        tmp_path
+        / "Library"
+        / "Developer"
+        / "Xcode"
+        / "iOS DeviceSupport"
+        / "iPhone18,1 27.0.1 (24A446)"
+    )
+    rows = default_details({item: 7_100_000_000})
+    action = ActionReport(
+        action=make_action(), size_bytes=7_100_000_000, resolved_paths=[item], details=rows
+    )
+    report = PluginReport(
+        plugin=make_plugin(name="xcode"), footprint_bytes=7_100_000_000, actions=[action]
+    )
+
+    # When
+    text = _render(render_plugin_details(report, verbosity=1), width=80)
+
+    # Then the row is one line hanging from the header, with its name, size, and folder
+    lines = [line for line in text.splitlines() if line.strip()]
+    assert len(lines) == 2
+    assert "\u2514\u2500 iPhone18,1 27.0.1 (24A446)" in lines[1]
+    assert human_size(7_100_000_000) in lines[1]
+    assert "iOS DeviceSupport" in lines[1]
+
+
+_LONG_NAME = "https___github_com_getsentry_sentry_cocoa_releases_download_9_33_0_Sentry_Dynamic_xcframework_zip"
+
+
+def _long_label_report() -> PluginReport:
+    """Build a plugin whose one row has a label far longer than a line's label column."""
+    row = Detail(label=_LONG_NAME, size_bytes=5)
+    action = ActionReport(action=make_action(), size_bytes=5, resolved_paths=[], details=[row])
+    return PluginReport(plugin=make_plugin(), footprint_bytes=5, actions=[action])
+
+
+def test_long_label_shortened_in_middle_at_v() -> None:
+    """Verify -v keeps both ends of a long label and drops its middle."""
+    # Given / When
+    text = _render(render_plugin_details(_long_label_report(), verbosity=1), width=80)
+
+    # Then the row is one line holding the start, an ellipsis, and the end
+    lines = [line for line in text.splitlines() if line.strip()]
+    assert len(lines) == 2
+    label = lines[1].split()[1]
+    assert len(label) == 40
+    assert label.startswith("https___github")
+    assert label.endswith("xcframework_zip")
+    assert "…" in label
+
+
+def test_long_label_shown_in_full_at_vv() -> None:
+    """Verify -vv shows the whole label."""
+    # Given / When
+    text = _render(render_plugin_details(_long_label_report(), verbosity=2), width=400)
+
+    # Then the label is all there, though a label this long folds across lines
+    assert _LONG_NAME in "".join(text.split())
+
+
+def test_info_document_actions_carry_details(tmp_path: Path) -> None:
+    """Verify each detail row reaches the JSON document with its fields."""
+    # Given an action with one row
+    row = Detail(label="proj", size_bytes=7, items=(".venv",), paths=(tmp_path / "proj",))
+    action = ActionReport(action=make_action(), size_bytes=7, resolved_paths=[], details=[row])
+    report = PluginReport(plugin=make_plugin(), footprint_bytes=7, actions=[action])
+
+    # When
+    doc = info_document(reports=[report], skipped=[])
+
+    # Then
+    assert doc["plugins"][0]["actions"][0]["details"] == [
+        {"label": "proj", "size_bytes": 7, "items": [".venv"], "paths": [str(tmp_path / "proj")]}
+    ]
+
+
+def _inset_report(paths: dict[str, tuple[Path, ...]]) -> PluginReport:
+    """Build a plugin whose rows each cover the given paths."""
+    rows = [
+        Detail(label=label, size_bytes=10, paths=row_paths) for label, row_paths in paths.items()
+    ]
+    action = ActionReport(
+        action=make_action(), size_bytes=10 * len(rows), resolved_paths=[], details=rows
+    )
+    return PluginReport(plugin=make_plugin(), footprint_bytes=action.size_bytes, actions=[action])
+
+
+def test_v_rows_hang_from_header_without_paths(tmp_path: Path) -> None:
+    """Verify -v draws each row as a branch of the plugin header and lists no paths."""
+    # Given two rows that each cover a path
+    report = _inset_report({"first": (tmp_path / "a",), "second": (tmp_path / "b",)})
+
+    # When
+    text = _render(render_plugin_details(report, verbosity=1), width=200)
+
+    # Then the first row takes a branch, the last a corner, and no path shows
+    lines = [line for line in text.splitlines() if line.strip()]
+    assert len(lines) == 3
+    assert "\u251c\u2500 first" in lines[1]
+    assert "\u2514\u2500 second" in lines[2]
+    assert str(tmp_path) not in text
+
+
+def test_vv_nests_absolute_paths_under_each_row(tmp_path: Path) -> None:
+    """Verify -vv hangs each row's full paths from that row, below the row's branch."""
+    # Given two rows, so the first row's paths sit beside a continuing branch
+    report = _inset_report({"first": (tmp_path / "a", tmp_path / "b"), "second": (tmp_path / "c",)})
+
+    # When
+    text = _render(render_plugin_details(report, verbosity=2), width=400)
+
+    # Then the first row's paths keep the header's line running beside them
+    lines = [line for line in text.splitlines() if line.strip()]
+    assert "\u251c\u2500 first" in lines[1]
+    assert lines[2].startswith("  \u2502  \u251c\u2500 ")
+    assert str(tmp_path / "a") in lines[2]
+    assert lines[3].startswith("  \u2502  \u2514\u2500 ")
+    assert "\u2514\u2500 second" in lines[4]
+    assert lines[5].startswith("     \u2514\u2500 ")
+    assert str(tmp_path / "c") in lines[5]
+
+
+def test_inset_rows_keep_their_columns_aligned(tmp_path: Path) -> None:
+    """Verify sizes line up across rows even with inset paths between them."""
+    # Given two rows of different label lengths, each with a path
+    report = _inset_report({"a": (tmp_path / "a",), "much-longer-label": (tmp_path / "b",)})
+
+    # When
+    text = _render(render_plugin_details(report, verbosity=1), width=200)
+
+    # Then both size cells end in the same column
+    size = human_size(10)
+    row_lines = [line for line in text.splitlines() if size in line]
+    assert len(row_lines) == 2
+    assert row_lines[0].index(size) == row_lines[1].index(size)
+
+
+def test_vv_long_label_never_cuts_the_size_at_80_columns() -> None:
+    """Verify a full label wider than the terminal folds instead of cutting the size."""
+    # Given a long label with a wide size and an item
+    row = Detail(label=_LONG_NAME, size_bytes=187_100_000, items=("artifacts",))
+    action = ActionReport(
+        action=make_action(), size_bytes=187_100_000, resolved_paths=[], details=[row]
+    )
+    report = PluginReport(plugin=make_plugin(), footprint_bytes=187_100_000, actions=[action])
+
+    # When
+    text = _render(render_plugin_details(report, verbosity=2), width=80)
+
+    # Then the size and item show whole, with no ellipsis anywhere
+    assert human_size(187_100_000) in text
+    assert "artifacts" in text
+    assert "…" not in text
