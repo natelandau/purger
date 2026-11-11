@@ -32,6 +32,7 @@ purger runs on macOS and Linux. Each supported tool is a plugin, and each plugin
 - `prek` (macOS, Linux): unused hook environments, or the entire cache with `--dangerous`.
 - `projects` (macOS, Linux): tool caches, installed dependencies, and build output inside the project folders you list in the config. It does nothing until you set `paths`. See [Configuration](#configuration).
 - `rip2` (macOS, Linux): the rip2 graveyard of deleted files. Runs only when `rip` on PATH is rip2.
+- `ruby` (macOS, Linux): old gem versions that no installed gem needs.
 - `simulators` (macOS): simulator devices the installed Xcode cannot run.
 - `swiftpm` (macOS, Linux): cached package clones, manifests, and binary frameworks.
 - `thumbnails` (Linux): the desktop file thumbnail cache.
