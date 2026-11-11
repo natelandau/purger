@@ -4,6 +4,7 @@ import importlib
 import logging
 import pkgutil
 import sys
+import threading
 from collections.abc import Callable, Sequence
 from functools import cache
 from types import ModuleType
@@ -78,7 +79,68 @@ def _discover(package: ModuleType) -> dict[str, Plugin]:
     return dict(sorted(found.items()))
 
 
-def skip_reason(plugin: Plugin, *, check_available: bool = True) -> SkipReason | None:
+class ProcessTable:
+    """Every process's argv, read once and shared by the busy checks of one scan.
+
+    The table reads on first use, so a scan where no plugin needs it never
+    lists processes. Make a new table when a fresh view is needed.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._rows: list[tuple[psutil.Process, list[str]]] | None = None
+
+    def running(self, matches: Callable[[list[str]], bool]) -> bool:
+        """Report whether a process outside purger's own subprocesses satisfies a check.
+
+        Args:
+            matches: Receives a process argv and returns True for the tool.
+
+        Returns:
+            bool: True when some readable process argv matches. Processes whose
+                argv cannot be read are skipped.
+        """
+        own_pid = psutil.Process().pid
+        return any(
+            matches(cmdline) and not _spawned_by(proc, pid=own_pid)
+            for proc, cmdline in self._snapshot()
+        )
+
+    def _snapshot(self) -> list[tuple[psutil.Process, list[str]]]:
+        with self._lock:
+            if self._rows is None:
+                self._rows = [
+                    (proc, cmdline)
+                    for proc in psutil.process_iter(["cmdline"])
+                    if (cmdline := proc.info["cmdline"])
+                ]
+            return self._rows
+
+
+def is_busy(plugin: Plugin, *, processes: ProcessTable | None = None) -> bool:
+    """Report whether the plugin's tool is running, so a cleanup now could remove files it uses.
+
+    Args:
+        plugin: Plugin to check.
+        processes: A table shared across plugins. Defaults to a fresh one.
+
+    Returns:
+        bool: True when a matching process runs outside purger, or when the
+            check fails, so no cleanup runs blind.
+    """
+    if plugin.busy_process is None:
+        return False
+    try:
+        return (processes or ProcessTable()).running(plugin.busy_process)
+    except Exception as exc:  # noqa: BLE001
+        # Plugin-supplied code and the process scan must not abort the whole run.
+        logger.debug("busy check for %s failed: %s", plugin.name, exc)
+        return True
+
+
+def skip_reason(
+    plugin: Plugin, *, check_available: bool = True, processes: ProcessTable | None = None
+) -> SkipReason | None:
     """Return why a plugin does not apply to this machine, or None if it does.
 
     Checks run cheapest first: platform, required binary, the plugin's own
@@ -87,44 +149,27 @@ def skip_reason(plugin: Plugin, *, check_available: bool = True) -> SkipReason |
     Args:
         plugin: Plugin to check.
         check_available: Run the availability hook and the process scan. Disable to avoid their cost.
+        processes: A process table shared across plugins. Defaults to a fresh one.
     """
     if sys.platform not in plugin.platforms:
         return SkipReason.PLATFORM
     if plugin.requires is not None and which(plugin.requires) is None:
         return SkipReason.MISSING_BINARY
-    if check_available and not _usable_now(plugin):
+    if check_available and (not _available(plugin) or is_busy(plugin, processes=processes)):
         return SkipReason.UNAVAILABLE
     return None
 
 
-def _usable_now(plugin: Plugin) -> bool:
-    """Report whether the plugin's availability hook passes and its tool is not running."""
+def _available(plugin: Plugin) -> bool:
+    """Report whether the plugin's own availability hook passes."""
+    if plugin.is_available is None:
+        return True
     try:
-        if plugin.is_available is not None and not plugin.is_available():
-            return False
-        return plugin.busy_process is None or not _tool_running(plugin.busy_process)
+        return plugin.is_available()
     except Exception as exc:  # noqa: BLE001
-        # Plugin-supplied code and the process scan must not abort the whole run.
-        logger.debug("availability check for %s failed: %s", plugin.name, exc)
+        # Plugin-supplied code must not abort the whole run.
+        logger.debug("is_available for %s failed: %s", plugin.name, exc)
         return False
-
-
-def _tool_running(matches: Callable[[list[str]], bool]) -> bool:
-    """Report whether a process outside purger's own subprocesses satisfies a check.
-
-    Args:
-        matches: Receives a process argv and returns True for the tool.
-
-    Returns:
-        bool: True when some readable process argv matches. Processes whose argv
-            cannot be read are skipped.
-    """
-    own_pid = psutil.Process().pid
-    for proc in psutil.process_iter(["cmdline"]):
-        cmdline = proc.info["cmdline"]
-        if cmdline and matches(cmdline) and not _spawned_by(proc, pid=own_pid):
-            return True
-    return False
 
 
 def _spawned_by(proc: psutil.Process, *, pid: int) -> bool:
@@ -136,8 +181,9 @@ def _spawned_by(proc: psutil.Process, *, pid: int) -> bool:
     try:
         return proc.pid == pid or any(parent.pid == pid for parent in proc.parents())
     except psutil.NoSuchProcess:
-        # The process exited, so it can no longer be using the tool's files.
-        return True
+        # An ancestor can exit mid-walk too. Only the process itself exiting
+        # means it can no longer be using the tool's files.
+        return not proc.is_running()
 
 
 def select_plugins(registry: dict[str, Plugin], names: Sequence[str]) -> list[Plugin]:

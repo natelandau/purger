@@ -9,6 +9,7 @@ from pathlib import Path
 from nclutils import pp
 
 from purger.concurrency import map_as_completed
+from purger.registry import is_busy
 from purger.reports import ActionReport, PluginReport, Status
 from purger.runner import run_action
 from purger.safety import invoking_home
@@ -51,7 +52,8 @@ def execute(
 ) -> Execution:
     """Run approved actions in plugin order, announcing each one before it runs.
 
-    Ctrl-C stops the run: the action that was running is marked failed, since it
+    A plugin whose tool is running when its turn comes is skipped, with its
+    actions marked skipped. Ctrl-C stops the run: the action that was running is marked failed, since it
     may have changed things before it stopped, and the rest are marked skipped.
 
     Args:
@@ -74,9 +76,17 @@ def execute(
     interrupted = False
     try:
         for plugin_report in reports:
-            for report in plugin_report.actions:
-                if id(report) not in pending:
-                    continue
+            todo = [report for report in plugin_report.actions if id(report) in pending]
+            if not todo:
+                continue
+            # The tool may have started while purger waited at a confirmation prompt.
+            if is_busy(plugin_report.plugin):
+                pp.warning(f"Skipped {plugin_report.plugin.name}: its tool is running now")
+                for report in todo:
+                    report.status = Status.SKIPPED
+                    report.error = "busy"
+                continue
+            for report in todo:
                 label = f"{plugin_report.plugin.name}/{report.action.name}"
                 if report.action.needs_sudo:
                     pp.warning(f"Running {label} with sudo")

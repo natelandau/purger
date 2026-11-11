@@ -127,8 +127,9 @@ CLEAN_EPILOGUE = f"""\
 The same document as `purger info --json`, plus `total_freed_bytes` at the top
 level, `freed_bytes` on each plugin, and `status` and `error` on each action.
 `status` is one of: {_STATUS_VALUES}. `declined` means no one approved it.
-`skipped` means it never started (for example sudo needs a password, or Ctrl-C
-stopped the run first). `failed` includes an action stopped by Ctrl-C, with
+`skipped` means it never started (for example sudo needs a password, the tool
+started running, or Ctrl-C stopped the run first). A skip because the tool is
+running has `error` set to `busy`. `failed` includes an action stopped by Ctrl-C, with
 `error` set to `interrupted`. `planned` appears only with `--dry-run`.
 {_JSON_ERRORS}"""
 

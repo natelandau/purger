@@ -36,7 +36,13 @@ from purger.output import (
     render_table,
 )
 from purger.plugin import Plugin, Tier
-from purger.registry import UnknownPluginError, discover_plugins, select_plugins, skip_reason
+from purger.registry import (
+    ProcessTable,
+    UnknownPluginError,
+    discover_plugins,
+    select_plugins,
+    skip_reason,
+)
 from purger.reports import (
     ActionReport,
     PluginReport,
@@ -164,8 +170,10 @@ def _error(code: str, message: str, *, exit_code: ExitCode, json_output: bool) -
     return exit_code
 
 
-def _measure_one(plugin: Plugin, *, dangerous: bool) -> PluginReport | SkippedPlugin:
-    reason = skip_reason(plugin)
+def _measure_one(
+    plugin: Plugin, *, dangerous: bool, processes: ProcessTable
+) -> PluginReport | SkippedPlugin:
+    reason = skip_reason(plugin, processes=processes)
     if reason is not None:
         return SkippedPlugin(name=plugin.name, reason=reason)
     return measure_plugin(plugin, include_dangerous=dangerous)
@@ -184,7 +192,7 @@ def _measure(
     """
     results: dict[int, PluginReport | SkippedPlugin] = {}
     for index, result in map_as_completed(
-        partial(_measure_one, dangerous=dangerous), items=plugins
+        partial(_measure_one, dangerous=dangerous, processes=ProcessTable()), items=plugins
     ):
         results[index] = result
         if display is not None:

@@ -767,7 +767,9 @@ def test_measure_keeps_plugin_order_when_plugins_finish_out_of_order(
     mocker.patch(
         "purger.cli.skip_reason",
         autospec=True,
-        side_effect=lambda plugin: SkipReason.PLATFORM if plugin.name == "gamma" else None,
+        side_effect=lambda plugin, processes: (
+            SkipReason.PLATFORM if plugin.name == "gamma" else None
+        ),
     )
     plugins = [make_plugin(name=name) for name in ("alpha", "beta", "gamma", "delta")]
     display = mocker.Mock(spec=MeasureDisplay)
@@ -780,3 +782,18 @@ def test_measure_keeps_plugin_order_when_plugins_finish_out_of_order(
     assert [s.name for s in scan.skipped] == ["gamma"]
     finished = {call.kwargs["name"] for call in display.finish.call_args_list}
     assert finished == {"alpha", "beta", "gamma", "delta"}
+
+
+def test_measure_shares_one_process_table(mocker: MockerFixture) -> None:
+    """Verify every plugin in one scan checks for busy tools against the same process table."""
+    # Given
+    mocker.patch("purger.cli.measure_plugin", autospec=True, side_effect=_fake_measure)
+    skip = mocker.patch("purger.cli.skip_reason", autospec=True, return_value=None)
+    plugins = [make_plugin(name=name) for name in ("alpha", "beta", "gamma")]
+
+    # When
+    cli._measure(plugins, dangerous=False, display=None)
+
+    # Then
+    tables = {id(call.kwargs["processes"]) for call in skip.call_args_list}
+    assert len(tables) == 1

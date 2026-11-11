@@ -14,8 +14,10 @@ from pytest_mock import MockerFixture
 
 from purger.registry import (
     DuplicatePluginError,
+    ProcessTable,
     UnknownPluginError,
     discover_plugins,
+    is_busy,
     select_plugins,
     skip_reason,
 )
@@ -292,18 +294,72 @@ def test_skip_reason_busy_process_after_is_available(mocker: MockerFixture) -> N
     process_iter.assert_not_called()
 
 
-def test_skip_reason_busy_process_exited(mocker: MockerFixture) -> None:
-    """Verify a matching process that exits during the scan does not count as running."""
+@pytest.mark.parametrize(
+    ("still_running", "expected"),
+    [(False, None), (True, SkipReason.UNAVAILABLE)],
+    ids=["process-exited", "ancestor-exited"],
+)
+def test_skip_reason_busy_process_lost_during_scan(
+    still_running: bool, expected: SkipReason | None, mocker: MockerFixture
+) -> None:
+    """Verify a vanished match is ignored, but one whose ancestor vanished still counts."""
     # Given
     process = mocker.Mock(info={"cmdline": ["tool"]}, pid=99999)
     process.parents.side_effect = psutil.NoSuchProcess(pid=99999)
+    process.is_running.return_value = still_running
     mocker.patch("purger.registry.psutil.process_iter", return_value=[process])
 
     # When
     reason = skip_reason(make_plugin(busy_process=_is_tool))
 
     # Then
-    assert reason is None
+    assert reason is expected
+
+
+def test_process_table_scans_once_for_many_plugins(mocker: MockerFixture) -> None:
+    """Verify plugins sharing a table read the process list once."""
+    # Given
+    process_iter = mocker.patch(
+        "purger.registry.psutil.process_iter",
+        return_value=[_process(mocker, cmdline=["other"], parent_pids=[1])],
+    )
+    table = ProcessTable()
+    plugins = [make_plugin(name=name, busy_process=_is_tool) for name in ("a", "b", "c")]
+
+    # When
+    reasons = [skip_reason(plugin, processes=table) for plugin in plugins]
+
+    # Then
+    assert reasons == [None, None, None]
+    process_iter.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("busy_process", "expected"),
+    [(None, False), (_is_tool, True)],
+    ids=["no-check", "tool-running"],
+)
+def test_is_busy(
+    busy_process: Callable[[list[str]], bool] | None, expected: bool, mocker: MockerFixture
+) -> None:
+    """Verify is_busy reports a running tool, and plugins without a check are never busy."""
+    # Given
+    mocker.patch(
+        "purger.registry.psutil.process_iter",
+        return_value=[_process(mocker, cmdline=["tool"], parent_pids=[1])],
+    )
+
+    # When / Then
+    assert is_busy(make_plugin(busy_process=busy_process)) is expected
+
+
+def test_is_busy_scan_fails(mocker: MockerFixture) -> None:
+    """Verify a failed scan counts as busy, so no cleanup runs blind."""
+    # Given
+    mocker.patch("purger.registry.psutil.process_iter", side_effect=psutil.AccessDenied())
+
+    # When / Then
+    assert is_busy(make_plugin(busy_process=_is_tool)) is True
 
 
 def test_skip_reason_busy_process_scan_fails(mocker: MockerFixture) -> None:
