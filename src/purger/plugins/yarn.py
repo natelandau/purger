@@ -1,7 +1,7 @@
 """Plugin for the Yarn global package caches."""
 
 from purger.plugin import Action, Plugin, Tier
-from purger.plugins._shared import env_dir
+from purger.plugins._shared import env_dir, program_matcher
 from purger.sizing import expand_paths
 
 
@@ -44,6 +44,7 @@ PLUGIN = Plugin(
     name="yarn",
     description="Yarn global package cache",
     is_available=_has_cache,
+    busy_process=program_matcher(r"yarn(\.c?js|-\d[\w.-]*\.cjs)?"),
     actions=(
         Action(
             name="cache",

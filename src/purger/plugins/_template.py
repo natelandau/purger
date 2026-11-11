@@ -8,9 +8,9 @@ docstring with one line that names the tool.
 """
 
 from functools import partial
-from pathlib import Path
 
 from purger.plugin import Action, Plugin, Tier
+from purger.plugins._shared import program_matcher
 from purger.runner import command_succeeds
 from purger.sizing import printed_dir_usage
 
@@ -24,18 +24,6 @@ def _is_available() -> bool:
         bool: True when the tool is usable.
     """
     return command_succeeds(["example-tool", "status"], timeout=10)
-
-
-def _is_example_tool(cmdline: list[str]) -> bool:
-    """Report whether a process argv runs example-tool.
-
-    Args:
-        cmdline: The process argv.
-
-    Returns:
-        bool: True when the executable is example-tool.
-    """
-    return Path(cmdline[0]).name == "example-tool"
 
 
 def _explain_failure(stderr: str) -> str | None:
@@ -67,10 +55,10 @@ PLUGIN = Plugin(
     is_available=_is_available,
     # Receives each running process's argv and returns True for the tool. While
     # a match runs, the plugin is skipped, since that run may be using the files
-    # a cleanup would remove. purger's own subprocesses never count. Match the
-    # executable or script name, not any argument, so an editor with a file
-    # named after the tool does not block it.
-    busy_process=_is_example_tool,
+    # a cleanup would remove. purger's own subprocesses never count.
+    # `program_matcher` matches the program's file name, also when an
+    # interpreter such as node or python launches it.
+    busy_process=program_matcher(r"example-tool"),
     # The footprint is the size in the `info` table. purger uses the first of
     # `size`, `size_cmd`, or `paths` that is set. With none, the footprint is
     # the sum of the action sizes, which is right only when no two actions

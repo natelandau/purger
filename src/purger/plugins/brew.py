@@ -6,6 +6,7 @@ from pathlib import Path
 from nclutils.sh import ShellCommandError, run_command
 
 from purger.plugin import Action, Plugin, Tier
+from purger.plugins._shared import program_matcher
 from purger.sizing import SIZE_CMD_TIMEOUT_SECONDS, disk_usage, parse_human_size
 
 _FREED = re.compile(r"free approximately (.+?) of disk space")
@@ -105,6 +106,7 @@ PLUGIN = Plugin(
     requires="brew",
     size_cmd=_CLEANUP_DRY_RUN,
     parse_size=_footprint,
+    busy_process=program_matcher(r"brew(\.sh|\.rb)?"),
     actions=(
         Action(
             name="cleanup",

@@ -12,6 +12,7 @@ from nclutils.sh import CompletedCommand, ShellCommandNotFoundError
 from pytest_mock import MockerFixture
 
 from purger.output import is_partial
+from purger.plugin import Plugin
 from purger.plugins import (
     ansible,
     apt,
@@ -593,40 +594,63 @@ def test_ansible_available_only_with_leftovers(
     assert ansible.PLUGIN.is_available() is leftover
 
 
-def test_ansible_skips_while_ansible_runs() -> None:
-    """Verify a running ansible command makes the plugin busy."""
+_PY = "/usr/bin/python3"
+_NODE = "/opt/homebrew/bin/node"
+_BREW = "/opt/homebrew/Library/Homebrew"
+
+
+@pytest.mark.parametrize(
+    ("plugin", "cmdline", "expected"),
+    [
+        (ansible.PLUGIN, [_PY, "/Users/me/.local/bin/ansible-playbook", "site.yml"], True),
+        (ansible.PLUGIN, [_PY, "-sP", "/usr/bin/ansible-playbook", "site.yml"], True),
+        (ansible.PLUGIN, ["/opt/homebrew/bin/ansible", "all", "-m", "ping"], True),
+        (ansible.PLUGIN, ["ansible-galaxy", "install", "-r", "requirements.yml"], True),
+        (ansible.PLUGIN, [_PY, "/Users/me/.local/bin/purger", "clean", "ansible"], False),
+        (ansible.PLUGIN, ["vim", "/Users/me/.ansible/notes"], False),
+        (ansible.PLUGIN, [_PY, "/Users/me/.local/share/ansible/script.py"], False),
+        (ansible.PLUGIN, [], False),
+        (brew.PLUGIN, ["/bin/bash", "-p", f"{_BREW}/brew.sh", "install", "jq"], True),
+        (
+            brew.PLUGIN,
+            [
+                f"{_BREW}/vendor/portable-ruby/current/bin/ruby",
+                "-W1",
+                f"{_BREW}/brew.rb",
+                "upgrade",
+            ],
+            True,
+        ),
+        (brew.PLUGIN, ["/opt/homebrew/bin/brew", "update"], True),
+        (brew.PLUGIN, ["/opt/homebrew/bin/brewx"], False),
+        (npm.PLUGIN, [_NODE, "/opt/homebrew/bin/npm", "install"], True),
+        (npm.PLUGIN, ["npm install left-pad", "", "", ""], True),
+        (npm.PLUGIN, [_NODE, "/opt/homebrew/lib/node_modules/npm/bin/npm-cli.js", "ci"], True),
+        (npm.PLUGIN, [_NODE, "/opt/homebrew/bin/npx", "ccstatusline@latest"], False),
+        (npm.PLUGIN, ["npm exec @upstash/context7-mcp", "", "", "", ""], False),
+        (npm.PLUGIN, [_NODE, "/opt/homebrew/bin/npm", "--yes", "x", "cowsay"], False),
+        (npm.PLUGIN, ["/Applications/My App/node", "/opt/homebrew/bin/npm", "ci"], True),
+        (npm.PLUGIN, ["npm", "ci"], True),
+        (npm.PLUGIN, [_NODE, "server.js"], False),
+        (pnpm.PLUGIN, ["/Users/me/Library/pnpm/pnpm", "install"], True),
+        (pnpm.PLUGIN, [_NODE, "/Users/me/.cache/node/corepack/pnpm/9.1.0/bin/pnpm.cjs", "i"], True),
+        (pnpm.PLUGIN, [_NODE, "/opt/homebrew/bin/npm", "install"], False),
+        (yarn.PLUGIN, [_NODE, "/opt/homebrew/bin/yarn", "install"], True),
+        (yarn.PLUGIN, [_NODE, "/repo/.yarn/releases/yarn-4.5.0.cjs", "install"], True),
+        (yarn.PLUGIN, [_NODE, "/repo/yarn-audit.js"], False),
+        (pip.PLUGIN, [_PY, "-m", "pip", "install", "requests"], True),
+        (pip.PLUGIN, ["/Users/me/.venv/bin/pip3.12", "install", "-r", "requirements.txt"], True),
+        (pip.PLUGIN, [_PY, "/Users/me/.venv/bin/pip", "download", "x"], True),
+        (pip.PLUGIN, [_PY, "-m", "pipx", "install", "x"], False),
+    ],
+)
+def test_busy_process_matches_tool_runs(plugin: Plugin, cmdline: list[str], expected: bool) -> None:
+    """Verify each plugin counts its tool as busy however it was launched, and nothing else."""
+    # Given
+    assert plugin.busy_process is not None
+
     # When / Then
-    assert ansible.PLUGIN.busy_process is ansible._is_ansible_command
-
-
-@pytest.mark.parametrize(
-    "cmdline",
-    [
-        ["/usr/bin/python3", "/Users/me/.local/bin/ansible-playbook", "site.yml"],
-        ["/usr/bin/python3", "-sP", "/usr/bin/ansible-playbook", "site.yml"],
-        ["/opt/homebrew/bin/ansible", "all", "-m", "ping"],
-        ["ansible-galaxy", "install", "-r", "requirements.yml"],
-    ],
-)
-def test_ansible_command_detected(cmdline: list[str]) -> None:
-    """Verify ansible commands count as running however they were started."""
-    # Given / When / Then
-    assert ansible._is_ansible_command(cmdline) is True
-
-
-@pytest.mark.parametrize(
-    "cmdline",
-    [
-        ["/usr/bin/python3", "/Users/me/.local/bin/purger", "clean", "ansible"],
-        ["vim", "/Users/me/.ansible/notes"],
-        ["/usr/bin/python3", "/Users/me/.local/share/ansible/script.py"],
-        [],
-    ],
-)
-def test_ansible_command_not_detected(cmdline: list[str]) -> None:
-    """Verify purger itself, unrelated commands, and unreadable argv do not count as ansible."""
-    # Given / When / Then
-    assert ansible._is_ansible_command(cmdline) is False
+    assert plugin.busy_process(cmdline) is expected
 
 
 @pytest.mark.parametrize(

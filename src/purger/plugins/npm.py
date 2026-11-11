@@ -3,6 +3,7 @@
 from functools import partial
 
 from purger.plugin import Action, Plugin, Tier
+from purger.plugins._shared import program_matcher
 from purger.sizing import printed_dir_usage
 
 _CACHE_DIR_CMD = ("npm", "config", "get", "cache")
@@ -37,6 +38,9 @@ PLUGIN = Plugin(
     size_cmd=_CACHE_DIR_CMD,
     # Only the parts purger can clean, so the two cleanups account for the whole footprint.
     parse_size=partial(printed_dir_usage, patterns=("_cacache", "_npx")),
+    # npx and `npm exec` often run for hours as MCP servers or a status line,
+    # and leave the package cache alone, so only other npm commands count.
+    busy_process=program_matcher(r"npm(-cli\.js)?", ignore_subcommands=frozenset({"exec", "x"})),
     actions=(
         Action(
             name="verify",
