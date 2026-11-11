@@ -23,7 +23,16 @@ _PODMAN_DF = (
 def test_podman_sums_raw_reclaimable(types: frozenset[str], expected: int) -> None:
     """Verify podman sizes come from the integer RawReclaimable field of the chosen rows."""
     # Given / When / Then
-    assert podman._reclaimable_from(_PODMAN_DF, types=types) == expected
+    assert podman.reclaimable_bytes_of(_PODMAN_DF, types=types) == expected
+
+
+def test_sum_reclaimable_bytes_reads_the_named_types() -> None:
+    """Verify the size reader built from type names sums only those types."""
+    # Given / When
+    read_size = podman.sum_reclaimable_bytes("Images", "Local Volumes")
+
+    # Then
+    assert read_size(_PODMAN_DF) == 5900
 
 
 def _patch_podman(
@@ -37,7 +46,7 @@ def _patch_podman(
         )
         return make_completed(returncode=125) if out is None else make_completed(stdout=out)
 
-    mocker.patch("purger.plugins.podman.run_command", autospec=True, side_effect=answer)
+    mocker.patch("purger.runner.run_command", autospec=True, side_effect=answer)
 
 
 def _podman_info(*, remote: bool) -> str:
@@ -58,26 +67,26 @@ _REMOTE: dict[str, object] = {
 }
 
 
-def test_podman_unavailable_when_info_fails(mocker: MockerFixture) -> None:
+def test_podman_skipped_when_info_fails(mocker: MockerFixture) -> None:
     """Verify podman is skipped when it does not answer, such as a stopped machine on macOS."""
     # Given
     _patch_podman(mocker, info=None)
-    assert podman.PLUGIN.is_available is not None
+    assert podman.PLUGIN.skip_unless is not None
 
     # When / Then
-    assert podman.PLUGIN.is_available() is False
+    assert podman.PLUGIN.skip_unless() is False
 
 
-def test_podman_available_for_a_local_service(mocker: MockerFixture) -> None:
-    """Verify native podman on Linux, whose service is not remote, is available."""
+def test_podman_runs_for_a_local_service(mocker: MockerFixture) -> None:
+    """Verify native podman on Linux, whose service is not remote, runs the plugin."""
     # Given
     _patch_podman(mocker, info=_podman_info(remote=False))
 
     # When / Then
-    assert podman._is_available() is True
+    assert podman.podman_service_is_local_and_running() is True
 
 
-def test_podman_available_through_a_podman_machine(
+def test_podman_runs_through_a_podman_machine(
     mocker: MockerFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Verify the default podman machine connection on macOS counts as local."""
@@ -87,7 +96,7 @@ def test_podman_available_through_a_podman_machine(
     _patch_podman(mocker, info=_podman_info(remote=True), connections=[_MACHINE, _REMOTE])
 
     # When / Then
-    assert podman._is_available() is True
+    assert podman.podman_service_is_local_and_running() is True
 
 
 @pytest.mark.parametrize(
@@ -105,13 +114,13 @@ def test_podman_available_through_a_podman_machine(
         ({}, None),
     ],
 )
-def test_podman_unavailable_for_a_remote_service(
+def test_podman_skipped_for_a_remote_service(
     mocker: MockerFixture,
     monkeypatch: pytest.MonkeyPatch,
     env: dict[str, str],
     connections: list[dict[str, object]] | None,
 ) -> None:
-    """Verify a connection to another host, or one podman cannot name, is never available."""
+    """Verify a connection to another host, or one podman cannot name, is always skipped."""
     # Given
     monkeypatch.delenv("CONTAINER_HOST", raising=False)
     monkeypatch.delenv("CONTAINER_CONNECTION", raising=False)
@@ -120,4 +129,4 @@ def test_podman_unavailable_for_a_remote_service(
     _patch_podman(mocker, info=_podman_info(remote=True), connections=connections)
 
     # When / Then
-    assert podman._is_available() is False
+    assert podman.podman_service_is_local_and_running() is False

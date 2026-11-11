@@ -1,14 +1,19 @@
 """Plugin for old browser builds that Playwright leaves in its shared cache."""
 
-import glob
 import re
 import sys
 from collections import defaultdict
 from pathlib import Path
 
-from purger.plugin import Action, Plugin, Tier
-from purger.plugins._shared import env_dir
-from purger.sizing import expand_paths
+from purger.plugin import (
+    Action,
+    DeletePaths,
+    Plugin,
+    PluginSettings,
+    RiskLevel,
+    folder_from_environment,
+)
+from purger.safety import invoking_home
 
 _BUILD = re.compile(r"^(?P<browser>.+)-(?P<revision>\d+)$")
 
@@ -25,9 +30,9 @@ def _registry_dir(platform: str) -> str:
     default = (
         "~/Library/Caches/ms-playwright"
         if platform == "darwin"
-        else f"{env_dir('XDG_CACHE_HOME', '~/.cache')}/ms-playwright"
+        else f"{folder_from_environment('XDG_CACHE_HOME', default='~/.cache')}/ms-playwright"
     )
-    return env_dir("PLAYWRIGHT_BROWSERS_PATH", default)
+    return folder_from_environment("PLAYWRIGHT_BROWSERS_PATH", default=default)
 
 
 def _old_builds(builds: list[Path]) -> list[Path]:
@@ -53,30 +58,56 @@ def _old_builds(builds: list[Path]) -> list[Path]:
     return sorted(old)
 
 
-def _old_build_paths() -> tuple[str, ...]:
-    """List the old browser builds now in the cache, as globs that match only themselves.
+def list_old_browser_builds() -> list[Path]:
+    """List the old browser builds now in the cache.
 
     Returns:
-        tuple[str, ...]: One escaped path per old build.
+        list[Path]: Each build older than the newest of its browser.
     """
-    registry = _registry_dir(sys.platform)
-    builds = expand_paths((f"{registry}/*",))
-    return tuple(glob.escape(str(path)) for path in _old_builds(builds))
+    registry = Path(_registry_dir(sys.platform))
+    try:
+        if registry.parts[0] == "~":
+            registry = invoking_home().joinpath(*registry.parts[1:])
+        else:
+            # Resolves `~user` forms, which `invoking_home` does not cover.
+            registry = registry.expanduser()
+        entries = list(registry.iterdir())
+    except (OSError, RuntimeError):
+        # No cache folder, or no home folder to find it in, means no builds.
+        return []
+    return _old_builds(entries)
+
+
+def old_browser_builds_exist() -> bool:
+    """Report whether the cache holds any old browser build."""
+    return bool(list_old_browser_builds())
+
+
+def find_old_browser_builds(settings: PluginSettings) -> list[Path]:  # noqa: ARG001
+    """Find the old browser builds now in the cache.
+
+    Args:
+        settings: The plugin's settings, which this plugin does not use.
+
+    Returns:
+        list[Path]: Each build older than the newest of its browser.
+    """
+    return list_old_browser_builds()
 
 
 PLUGIN = Plugin(
     name="playwright",
     description="Playwright browser builds",
-    is_available=lambda: bool(_old_build_paths()),
+    skip_unless=old_browser_builds_exist,
     actions=(
         Action(
             name="old-browsers",
-            tier=Tier.CAUTION,
-            help=(
+            risk_level=RiskLevel.CAUTION,
+            description=(
                 "Remove each browser build older than the newest one. A project pinned "
                 "to an older Playwright needs `playwright install` before its next run."
             ),
-            paths=_old_build_paths,
+            cleanup=DeletePaths(found_by=find_old_browser_builds),
         ),
     ),
 )

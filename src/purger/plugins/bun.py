@@ -5,10 +5,16 @@ import re
 
 from nclutils.sh import ShellCommandError, run_command
 
-from purger.plugin import Action, Plugin, Tier
-from purger.sizing import printed_dir_usage
+from purger.plugin import (
+    Action,
+    Plugin,
+    RiskLevel,
+    RunCommand,
+    SizeOfDirectoryPrintedBy,
+    SizeUnknown,
+)
 
-_CACHE_DIR_CMD = ("bun", "pm", "cache")
+BUN_CACHE_DIRECTORY_COMMAND = ("bun", "pm", "cache")
 # The first release with `bun pm cache prune`. Older bun prints the cache path for
 # any unknown cache action and exits zero, so a prune would report success and do nothing.
 _MIN_VERSION = (1, 4, 4)
@@ -17,7 +23,7 @@ _VERSION = re.compile(r"^(\d+)\.(\d+)\.(\d+)")
 logger = logging.getLogger(__name__)
 
 
-def _is_available() -> bool:
+def bun_supports_cache_prune() -> bool:
     """Report whether the installed bun has `bun pm cache prune`.
 
     Returns:
@@ -42,30 +48,29 @@ def _is_available() -> bool:
 PLUGIN = Plugin(
     name="bun",
     description="bun package cache",
-    requires="bun",
-    is_available=_is_available,
-    size_cmd=_CACHE_DIR_CMD,
-    parse_size=printed_dir_usage,
+    requires_on_path="bun",
+    skip_unless=bun_supports_cache_prune,
+    total_size=SizeOfDirectoryPrintedBy(BUN_CACHE_DIRECTORY_COMMAND),
     actions=(
         Action(
             name="prune",
-            tier=Tier.SAFE,
-            help=(
+            risk_level=RiskLevel.SAFE,
+            description=(
                 "Remove packages bun has not downloaded or linked in 30 days. "
                 "They download again when a project needs them."
             ),
-            command=("bun", "pm", "cache", "prune", "--max-age", "30"),
+            cleanup=RunCommand("bun", "pm", "cache", "prune", "--max-age", "30"),
+            size=SizeUnknown(reason="bun cannot preview which packages cache prune removes"),
         ),
         Action(
             name="clean",
-            tier=Tier.DANGEROUS,
-            help=(
+            risk_level=RiskLevel.DANGEROUS,
+            description=(
                 "Wipe the entire bun package cache. Every package downloads again, "
                 "and projects that use bun's global store need `bun install` first."
             ),
-            command=("bun", "pm", "cache", "rm"),
-            size_cmd=_CACHE_DIR_CMD,
-            parse_size=printed_dir_usage,
+            cleanup=RunCommand("bun", "pm", "cache", "rm"),
+            size=SizeOfDirectoryPrintedBy(BUN_CACHE_DIRECTORY_COMMAND),
         ),
     ),
 )

@@ -1,8 +1,15 @@
 """Plugin for the uv package cache."""
 
-from purger.plugin import Action, Plugin, Tier
+from purger.plugin import (
+    Action,
+    Plugin,
+    RiskLevel,
+    RunCommand,
+    SizeReportedByCommand,
+    SizeUnknown,
+)
 
-_SIZE_CMD = (
+UV_CACHE_SIZE_COMMAND = (
     "uv",
     "cache",
     "size",
@@ -15,21 +22,22 @@ _SIZE_CMD = (
 PLUGIN = Plugin(
     name="uv",
     description="uv package cache",
-    requires="uv",
-    size_cmd=_SIZE_CMD,
+    requires_on_path="uv",
+    total_size=SizeReportedByCommand(UV_CACHE_SIZE_COMMAND, read_size=int),
     actions=(
         Action(
             name="prune",
-            tier=Tier.SAFE,
-            help="Remove unused cache entries, keeping everything current projects use.",
-            command=("uv", "cache", "prune"),
+            risk_level=RiskLevel.SAFE,
+            description="Remove unused cache entries, keeping everything current projects use.",
+            cleanup=RunCommand("uv", "cache", "prune"),
+            size=SizeUnknown(reason="uv cannot report what prune would remove"),
         ),
         Action(
             name="clean",
-            tier=Tier.DANGEROUS,
-            help="Wipe the entire uv cache. Every package is re-downloaded and rebuilt on next use.",
-            command=("uv", "cache", "clean", "--force"),
-            size_cmd=_SIZE_CMD,
+            risk_level=RiskLevel.DANGEROUS,
+            description="Wipe the entire uv cache. Every package is re-downloaded and rebuilt on next use.",
+            cleanup=RunCommand("uv", "cache", "clean", "--force"),
+            size=SizeReportedByCommand(UV_CACHE_SIZE_COMMAND, read_size=int),
         ),
     ),
 )

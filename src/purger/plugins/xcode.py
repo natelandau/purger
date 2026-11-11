@@ -1,35 +1,35 @@
 """Plugin for Xcode build products and device support files."""
 
-from purger.plugin import Action, Plugin, Tier
+from purger.plugin import Action, DeletePaths, OperatingSystem, Plugin, RiskLevel
 
 PLUGIN = Plugin(
     name="xcode",
     description="Xcode derived data, device support, and archives",
-    platforms=frozenset({"darwin"}),
+    operating_systems=(OperatingSystem.MACOS,),
     actions=(
         Action(
             name="derived-data",
-            tier=Tier.SAFE,
-            help="Remove build products and indexes. Xcode rebuilds them on next build.",
-            paths=("~/Library/Developer/Xcode/DerivedData/*",),
+            risk_level=RiskLevel.SAFE,
+            description="Remove build products and indexes. Xcode rebuilds them on next build.",
+            cleanup=DeletePaths("~/Library/Developer/Xcode/DerivedData/*"),
         ),
         Action(
             name="device-support",
-            tier=Tier.CAUTION,
-            help=(
+            risk_level=RiskLevel.CAUTION,
+            description=(
                 "Remove iOS debug symbols copied from devices. "
                 "Reconnecting each device re-copies them, which takes minutes."
             ),
-            paths=("~/Library/Developer/Xcode/iOS DeviceSupport/*",),
+            cleanup=DeletePaths("~/Library/Developer/Xcode/iOS DeviceSupport/*"),
         ),
         Action(
             name="archives",
-            tier=Tier.DANGEROUS,
-            help=(
+            risk_level=RiskLevel.DANGEROUS,
+            description=(
                 "Remove app archives, which hold the dSYMs needed to symbolicate shipped apps. "
                 "Deleted archives cannot be rebuilt."
             ),
-            paths=("~/Library/Developer/Xcode/Archives/*",),
+            cleanup=DeletePaths("~/Library/Developer/Xcode/Archives/*"),
         ),
     ),
 )

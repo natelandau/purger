@@ -1,8 +1,14 @@
 """Plugin for the Poetry package cache and the virtualenvs Poetry manages."""
 
-from purger.plugin import Action, Plugin, Tier
-from purger.plugins._shared import env_dir
-from purger.sizing import expand_paths
+from purger.plugin import (
+    Action,
+    DeletePaths,
+    Plugin,
+    RiskLevel,
+    directory_from_environment,
+    user_cache_folders,
+)
+from purger.sizing import any_path_exists
 
 
 def _cache_roots() -> tuple[str, ...]:
@@ -15,12 +21,15 @@ def _cache_roots() -> tuple[str, ...]:
     Returns:
         tuple[str, ...]: Cache folders, without duplicates.
     """
-    xdg_cache = env_dir("XDG_CACHE_HOME", "~/.cache")
-    defaults = ("~/Library/Caches/pypoetry", "~/.cache/pypoetry", f"{xdg_cache}/pypoetry")
-    return tuple(dict.fromkeys((env_dir("POETRY_CACHE_DIR", defaults[0]), *defaults)))
+    defaults = user_cache_folders("pypoetry")
+    return tuple(
+        dict.fromkeys(
+            (directory_from_environment("POETRY_CACHE_DIR", default=defaults[0]), *defaults)
+        )
+    )
 
 
-def _cache_patterns() -> tuple[str, ...]:
+def poetry_cache_globs() -> tuple[str, ...]:
     """List the downloaded package data to delete, as glob-safe patterns.
 
     Covers the repository caches and the downloaded wheels and sdists in
@@ -33,7 +42,7 @@ def _cache_patterns() -> tuple[str, ...]:
     return tuple(f"{root}/{part}/*" for root in _cache_roots() for part in ("cache", "artifacts"))
 
 
-def _virtualenv_patterns() -> tuple[str, ...]:
+def poetry_virtualenv_globs() -> tuple[str, ...]:
     """List the virtualenvs Poetry created, as glob-safe patterns.
 
     `POETRY_VIRTUALENVS_PATH` overrides the default `virtualenvs` folder inside
@@ -43,39 +52,41 @@ def _virtualenv_patterns() -> tuple[str, ...]:
         tuple[str, ...]: Virtualenv patterns, without duplicates.
     """
     roots = _cache_roots()
-    override = env_dir("POETRY_VIRTUALENVS_PATH", f"{roots[0]}/virtualenvs")
+    override = directory_from_environment(
+        "POETRY_VIRTUALENVS_PATH", default=f"{roots[0]}/virtualenvs"
+    )
     return tuple(dict.fromkeys((f"{override}/*", *(f"{root}/virtualenvs/*" for root in roots))))
 
 
-_CACHE_PATHS = _cache_patterns()
-_VIRTUALENV_PATHS = _virtualenv_patterns()
+POETRY_CACHE_GLOBS = poetry_cache_globs()
+POETRY_VIRTUALENV_GLOBS = poetry_virtualenv_globs()
 
 
-def _has_data() -> bool:
+def poetry_left_data() -> bool:
     """Report whether Poetry left a cache or virtualenvs, since the plugin does not need poetry installed.
 
     Returns:
         bool: True when any cache or virtualenv path has contents.
     """
-    return bool(expand_paths(_CACHE_PATHS + _VIRTUALENV_PATHS))
+    return any_path_exists(POETRY_CACHE_GLOBS + POETRY_VIRTUALENV_GLOBS)
 
 
 PLUGIN = Plugin(
     name="poetry",
     description="Poetry package cache and virtualenvs",
-    is_available=_has_data,
+    skip_unless=poetry_left_data,
     actions=(
         Action(
             name="cache",
-            tier=Tier.CAUTION,
-            help="Wipe the Poetry package cache. Packages download again on next install.",
-            paths=_CACHE_PATHS,
+            risk_level=RiskLevel.CAUTION,
+            description="Wipe the Poetry package cache. Packages download again on next install.",
+            cleanup=DeletePaths(*POETRY_CACHE_GLOBS),
         ),
         Action(
             name="virtualenvs",
-            tier=Tier.CAUTION,
-            help="Remove the virtualenvs Poetry created. Each project needs `poetry install` again.",
-            paths=_VIRTUALENV_PATHS,
+            risk_level=RiskLevel.CAUTION,
+            description="Remove the virtualenvs Poetry created. Each project needs `poetry install` again.",
+            cleanup=DeletePaths(*POETRY_VIRTUALENV_GLOBS),
         ),
     ),
 )

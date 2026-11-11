@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from pytest_mock import MockerFixture
 
+from purger.plugin import SizeComputedBy
 from purger.plugins import pnpm
 from purger.sizing import disk_usage
 from tests.conftest import make_completed
@@ -50,10 +51,10 @@ def test_pnpm_metadata_prune_measures_listed_folders(tmp_path: Path, mocker: Moc
         ],
     )
     action = next(a for a in pnpm.PLUGIN.actions if a.name == "metadata-prune")
-    assert action.size is not None
+    assert isinstance(action.size, SizeComputedBy)
 
     # When
-    size = action.size()
+    size = action.size.function()
 
     # Then
     assert size == disk_usage([stale])
@@ -71,10 +72,10 @@ _NODE = "/opt/homebrew/bin/node"
         (["/Users/me/Library/pnpm/pnpm", "run", "dev"], False),
     ],
 )
-def test_pnpm_busy_process_matches_pnpm_runs(cmdline: list[str], expected: bool) -> None:
-    """Verify pnpm counts as busy however it was launched, and nothing else does."""
+def test_pnpm_skips_while_pnpm_runs(cmdline: list[str], expected: bool) -> None:
+    """Verify pnpm counts as running however it was launched, and nothing else does."""
     # Given
-    assert pnpm.PLUGIN.busy_process is not None
+    assert pnpm.PLUGIN.skip_while_running is not None
 
     # When / Then
-    assert pnpm.PLUGIN.busy_process(cmdline) is expected
+    assert pnpm.PLUGIN.skip_while_running(cmdline) is expected

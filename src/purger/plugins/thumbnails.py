@@ -1,20 +1,28 @@
 """Plugin for the freedesktop thumbnail cache that Linux desktops share."""
 
-from purger.plugin import Action, Plugin, Tier
-from purger.plugins._shared import env_dir
+from purger.plugin import (
+    Action,
+    DeletePaths,
+    OperatingSystem,
+    Plugin,
+    RiskLevel,
+    directory_from_environment,
+)
 
-_THUMBNAIL_PATHS = (f"{env_dir('XDG_CACHE_HOME', '~/.cache')}/thumbnails/*",)
+THUMBNAIL_GLOBS = (
+    f"{directory_from_environment('XDG_CACHE_HOME', default='~/.cache')}/thumbnails/*",
+)
 
 PLUGIN = Plugin(
     name="thumbnails",
     description="Desktop file thumbnail cache",
-    platforms=frozenset({"linux"}),
+    operating_systems=(OperatingSystem.LINUX,),
     actions=(
         Action(
             name="cache",
-            tier=Tier.SAFE,
-            help="Remove cached file thumbnails. File managers draw them again when needed.",
-            paths=_THUMBNAIL_PATHS,
+            risk_level=RiskLevel.SAFE,
+            description="Remove cached file thumbnails. File managers draw them again when needed.",
+            cleanup=DeletePaths(*THUMBNAIL_GLOBS),
         ),
     ),
 )

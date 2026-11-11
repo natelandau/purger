@@ -8,6 +8,7 @@ from pytest_mock import MockerFixture
 
 from purger.config import Config
 from purger.details import merge
+from purger.plugin import reset_run_caches
 from purger.plugins import simulators
 from purger.sizing import disk_usage, measure_action
 from tests.conftest import make_completed
@@ -15,8 +16,8 @@ from tests.conftest import make_completed
 
 @pytest.fixture(autouse=True)
 def _fresh_listing() -> None:
-    """Drop the cached simctl listing so each test reads its own mock."""
-    simulators._unavailable_labels.cache_clear()
+    """Forget the cached simctl listing so each test reads its own mock."""
+    reset_run_caches()
 
 
 def _simctl_listing(tmp_path: Path) -> str:
@@ -50,14 +51,18 @@ def test_simulators_size_counts_only_unavailable_devices(
     )
 
     # When
-    report = measure_action(simulators.PLUGIN.actions[0])
+    report = measure_action(
+        simulators.PLUGIN.actions[0], settings=Config().settings_for(simulators.PLUGIN)
+    )
 
     # Then
     assert report.size_bytes == disk_usage([tmp_path / "OLD"])
 
 
-def test_simulators_details_label_device_and_runtime(tmp_path: Path, mocker: MockerFixture) -> None:
-    """Verify each unavailable device shows its name and runtime."""
+def test_simulators_size_breakdown_label_device_and_runtime(
+    tmp_path: Path, mocker: MockerFixture
+) -> None:
+    """Verify each size breakdown row shows its name and runtime."""
     # Given
     listing = json.dumps(
         {
@@ -75,7 +80,9 @@ def test_simulators_details_label_device_and_runtime(tmp_path: Path, mocker: Moc
     )
 
     # When
-    rows = simulators._details({tmp_path / "D": 5}, Config().settings_for(simulators.PLUGIN))
+    rows = simulators.one_row_per_device(
+        {tmp_path / "D": 5}, Config().settings_for(simulators.PLUGIN)
+    )
 
     # Then
     assert [(row.label, row.size_bytes) for row in rows] == [("iPhone 15 (iOS 17.5)", 5)]
@@ -96,14 +103,16 @@ def test_simulators_size_matches_folders_with_glob_characters(
     )
 
     # When
-    report = measure_action(simulators.PLUGIN.actions[0])
+    report = measure_action(
+        simulators.PLUGIN.actions[0], settings=Config().settings_for(simulators.PLUGIN)
+    )
 
     # Then
     assert report.resolved_paths == [base / "OLD"]
     assert report.size_bytes == disk_usage([base / "OLD"])
 
 
-def test_simulators_details_keep_same_named_devices_apart(
+def test_simulators_size_breakdown_keep_same_named_devices_apart(
     tmp_path: Path, mocker: MockerFixture
 ) -> None:
     """Verify two devices with the same name and runtime stay separate rows after merging."""
@@ -126,7 +135,7 @@ def test_simulators_details_keep_same_named_devices_apart(
     sizes = {tmp_path / "A": 5, tmp_path / "B": 7}
 
     # When
-    rows = merge(simulators._details(sizes, Config().settings_for(simulators.PLUGIN)))
+    rows = merge(simulators.one_row_per_device(sizes, Config().settings_for(simulators.PLUGIN)))
 
     # Then
     assert [row.size_bytes for row in rows] == [7, 5]
@@ -142,7 +151,7 @@ def test_simulators_unavailable_until_first_launch_finishes(mocker: MockerFixtur
     )
 
     # When / Then
-    assert simulators._is_available() is False
+    assert simulators.xcode_first_launch_is_complete() is False
     assert run.call_args.args[0] == ["xcodebuild", "-checkFirstLaunchStatus"]
 
 
@@ -154,6 +163,6 @@ def test_simulators_never_run_xcodebuild_without_developer_tools(mocker: MockerF
     )
 
     # When / Then
-    assert simulators._is_available() is False
+    assert simulators.xcode_first_launch_is_complete() is False
     run.assert_called_once()
     assert run.call_args.args[0] == ["xcode-select", "-p"]

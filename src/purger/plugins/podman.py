@@ -3,29 +3,29 @@
 import json
 import logging
 import os
-from functools import partial
+from collections.abc import Callable
 
-from nclutils.sh import ShellCommandError, run_command
+from purger.plugin import (
+    Action,
+    Plugin,
+    RiskLevel,
+    RunCommand,
+    SizeReportedByCommand,
+)
+from purger.runner import probe_output
 
-from purger.plugin import Action, Plugin, Tier
-
-_DF_CMD = ("podman", "system", "df", "--format", "json")
-_REMOVABLE = frozenset({"Images", "Containers"})
+PODMAN_DISK_USAGE_COMMAND = ("podman", "system", "df", "--format", "json")
 
 logger = logging.getLogger(__name__)
 
 
 def _json_output(argv: list[str]) -> object | None:
     """Run a podman query and parse its JSON output, or return None when either step fails."""
-    try:
-        result = run_command(argv, check=False, timeout=10)
-    except ShellCommandError as exc:
-        logger.debug("%s failed: %s", " ".join(argv), exc)
-        return None
-    if not result.ok:
+    output = probe_output(argv, timeout=10)
+    if output is None:
         return None
     try:
-        return json.loads(result.stdout)
+        return json.loads(output)
     except json.JSONDecodeError:
         logger.debug("%s printed invalid JSON", " ".join(argv))
         return None
@@ -60,7 +60,7 @@ def _remote_is_local() -> bool:
     return False
 
 
-def _is_available() -> bool:
+def podman_service_is_local_and_running() -> bool:
     """Report whether a Podman service on this machine answers.
 
     On macOS that needs a running podman machine. A service on another host is
@@ -81,7 +81,7 @@ def _is_available() -> bool:
     return False
 
 
-def _reclaimable_from(output: str, types: frozenset[str]) -> int:
+def reclaimable_bytes_of(output: str, types: frozenset[str]) -> int:
     """Sum the reclaimable bytes of the given `podman system df` types.
 
     Args:
@@ -94,33 +94,57 @@ def _reclaimable_from(output: str, types: frozenset[str]) -> int:
     return sum(row["RawReclaimable"] for row in json.loads(output) if row.get("Type") in types)
 
 
+def sum_reclaimable_bytes(*types: str) -> Callable[[str], int]:
+    """Build a size reader that sums the reclaimable bytes of the given row types.
+
+    Args:
+        *types: Row types to include, such as `Images` or `Build Cache`.
+    """
+    row_types = frozenset(types)
+
+    def read_reclaimable_bytes(output: str) -> int:
+        return reclaimable_bytes_of(output, row_types)
+
+    return read_reclaimable_bytes
+
+
+# The total size and the system action read the same rows, so their sizes agree.
+system_prune_reclaimable_bytes = sum_reclaimable_bytes("Images", "Containers")
+
+
 PLUGIN = Plugin(
     name="podman",
     description="Podman images, containers, build cache, and volumes",
-    requires="podman",
-    is_available=_is_available,
-    size_cmd=_DF_CMD,
-    parse_size=partial(_reclaimable_from, types=_REMOVABLE),
+    requires_on_path="podman",
+    skip_unless=podman_service_is_local_and_running,
+    total_size=SizeReportedByCommand(
+        PODMAN_DISK_USAGE_COMMAND,
+        read_size=system_prune_reclaimable_bytes,
+    ),
     actions=(
         Action(
             name="system",
-            tier=Tier.CAUTION,
-            help=(
+            risk_level=RiskLevel.CAUTION,
+            description=(
                 "Remove all unused images, stopped containers, pods, networks, and build cache. "
                 "Images must be pulled again before next use."
             ),
-            command=("podman", "system", "prune", "--all", "--force"),
-            size_cmd=_DF_CMD,
-            parse_size=partial(_reclaimable_from, types=_REMOVABLE),
+            cleanup=RunCommand("podman", "system", "prune", "--all", "--force"),
+            size=SizeReportedByCommand(
+                PODMAN_DISK_USAGE_COMMAND,
+                read_size=system_prune_reclaimable_bytes,
+            ),
         ),
         Action(
             name="volumes",
-            tier=Tier.DANGEROUS,
-            help="Remove all unused volumes. Volume data such as databases is lost permanently.",
-            command=("podman", "volume", "prune", "--force"),
-            size_cmd=_DF_CMD,
-            parse_size=partial(_reclaimable_from, types=frozenset({"Local Volumes"})),
-            outside_footprint=True,
+            risk_level=RiskLevel.DANGEROUS,
+            description="Remove all unused volumes. Volume data such as databases is lost permanently.",
+            cleanup=RunCommand("podman", "volume", "prune", "--force"),
+            size=SizeReportedByCommand(
+                PODMAN_DISK_USAGE_COMMAND,
+                read_size=sum_reclaimable_bytes("Local Volumes"),
+            ),
+            adds_to_plugin_total_size=True,
         ),
     ),
 )

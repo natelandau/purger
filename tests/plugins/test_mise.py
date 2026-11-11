@@ -15,7 +15,7 @@ def test_mise_prunable_install_paths() -> None:
     )
 
     # When / Then
-    assert mise._prunable_install_paths(output) == [
+    assert mise.prunable_install_paths(output) == [
         Path("/m/node/20.0.0"),
         Path("/m/node/21.0.0"),
     ]
@@ -24,13 +24,13 @@ def test_mise_prunable_install_paths() -> None:
 def test_mise_prunable_install_paths_empty() -> None:
     """Verify nothing prunable measures nothing."""
     # Given / When / Then
-    assert mise._prunable_install_paths("{}") == []
+    assert mise.prunable_install_paths("{}") == []
 
 
-def test_mise_prune_counts_outside_footprint() -> None:
-    """Verify pruned tool versions add to the footprint, since the mise cache excludes them."""
+def test_mise_prune_adds_to_plugin_total_size() -> None:
+    """Verify pruned tool versions add to the total size, since the mise cache excludes them."""
     # Given / When
-    flags = {a.name: a.outside_footprint for a in mise.PLUGIN.actions}
+    flags = {a.name: a.adds_to_plugin_total_size for a in mise.PLUGIN.actions}
 
     # Then
     assert flags == {"cache-prune": False, "prune": True, "cache-clear": False}

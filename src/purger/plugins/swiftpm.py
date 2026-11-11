@@ -2,36 +2,47 @@
 
 import sys
 
-from purger.plugin import Action, Plugin, Tier
-from purger.plugins._shared import env_dir
+from purger.plugin import (
+    Action,
+    DeletePaths,
+    Plugin,
+    RiskLevel,
+    RunCommand,
+    SizeOfPaths,
+    directory_from_environment,
+)
 
 # The real folder, since purger skips paths reached through ~/.swiftpm/cache, a link to it.
-_CACHE = (
+SWIFTPM_CACHE_DIRECTORY = (
     "~/Library/Caches/org.swift.swiftpm"
     if sys.platform == "darwin"
-    else f"{env_dir('XDG_CACHE_HOME', '~/.cache')}/org.swift.swiftpm"
+    else f"{directory_from_environment('XDG_CACHE_HOME', default='~/.cache')}/org.swift.swiftpm"
 )
 
 PLUGIN = Plugin(
     name="swiftpm",
     description="Swift Package Manager package and binary artifact cache",
-    requires="swift",
+    requires_on_path="swift",
     actions=(
         Action(
             name="purge-cache",
-            tier=Tier.CAUTION,
-            help=(
+            risk_level=RiskLevel.CAUTION,
+            description=(
                 "Remove cached package clones, registry downloads, and compiled manifests. "
                 "Packages clone again on next resolve."
             ),
-            command=("swift", "package", "purge-cache"),
-            paths=(f"{_CACHE}/repositories", f"{_CACHE}/registry/downloads", f"{_CACHE}/manifests"),
+            cleanup=RunCommand("swift", "package", "purge-cache"),
+            size=SizeOfPaths(
+                f"{SWIFTPM_CACHE_DIRECTORY}/repositories",
+                f"{SWIFTPM_CACHE_DIRECTORY}/registry/downloads",
+                f"{SWIFTPM_CACHE_DIRECTORY}/manifests",
+            ),
         ),
         Action(
             name="artifacts",
-            tier=Tier.CAUTION,
-            help="Remove downloaded binary frameworks. They download again on next resolve.",
-            paths=(f"{_CACHE}/artifacts/*",),
+            risk_level=RiskLevel.CAUTION,
+            description="Remove downloaded binary frameworks. They download again on next resolve.",
+            cleanup=DeletePaths(f"{SWIFTPM_CACHE_DIRECTORY}/artifacts/*"),
         ),
     ),
 )

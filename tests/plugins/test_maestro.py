@@ -25,7 +25,7 @@ def test_maestro_output_follows_xdg_state_home(
         monkeypatch.setenv("XDG_STATE_HOME", xdg_state_home)
 
     # When / Then
-    assert maestro._test_output_patterns() == expected
+    assert maestro.maestro_test_output_globs() == expected
 
 
 @pytest.mark.parametrize("has_output", [True, False], ids=["output", "nothing-to-clean"])
@@ -37,11 +37,11 @@ def test_maestro_available_only_with_output(
     if has_output:
         (tmp_path / ".maestro" / "tests" / "2026-11-10_041643").mkdir(parents=True)
     mocker.patch("purger.sizing.invoking_home", return_value=tmp_path)
-    mocker.patch.object(maestro, "_TEST_OUTPUT_PATHS", ("~/.maestro/tests/*",))
-    assert maestro.PLUGIN.is_available is not None
+    mocker.patch.object(maestro, "MAESTRO_TEST_OUTPUT_GLOBS", ("~/.maestro/tests/*",))
+    assert maestro.PLUGIN.skip_unless is not None
 
     # When / Then
-    assert maestro.PLUGIN.is_available() is has_output
+    assert maestro.PLUGIN.skip_unless() is has_output
 
 
 @pytest.mark.parametrize(
@@ -52,10 +52,10 @@ def test_maestro_available_only_with_output(
     ],
     ids=["maestro", "other"],
 )
-def test_maestro_busy_while_maestro_runs(cmdline: list[str], expected: bool) -> None:
+def test_maestro_skipped_while_maestro_runs(cmdline: list[str], expected: bool) -> None:
     """Verify only a Maestro JVM process makes the plugin busy."""
     # Given
-    assert maestro.PLUGIN.busy_process is not None
+    assert maestro.PLUGIN.skip_while_running is not None
 
     # When / Then
-    assert maestro.PLUGIN.busy_process(cmdline) is expected
+    assert maestro.PLUGIN.skip_while_running(cmdline) is expected

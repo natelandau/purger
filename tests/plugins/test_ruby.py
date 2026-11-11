@@ -35,8 +35,8 @@ def _install_gem(gem_dir: Path, full_name: str, size: int) -> None:
 def _mock_gem(mocker: MockerFixture, gem_dir: Path, dry_run: str = _DRY_RUN) -> None:
     """Answer the gem queries the plugin and the sizing code run."""
     outputs = {
-        ruby._GEM_DIR_CMD: f"{gem_dir}\n",
-        (*ruby._CLEANUP_CMD, "-n"): dry_run,
+        ruby.GEM_DIRECTORY_COMMAND: f"{gem_dir}\n",
+        (*ruby.GEM_CLEANUP_COMMAND, "-n"): dry_run,
     }
     for target in ("purger.plugins.ruby.run_command", "purger.sizing.run_command"):
         mocker.patch(
@@ -44,12 +44,6 @@ def _mock_gem(mocker: MockerFixture, gem_dir: Path, dry_run: str = _DRY_RUN) -> 
             autospec=True,
             side_effect=lambda argv, **_: make_completed(stdout=outputs[tuple(argv)]),
         )
-
-
-@pytest.fixture(autouse=True)
-def _fresh_gem_dir() -> None:
-    """Forget the GEM_HOME a previous test's mocked `gem` reported."""
-    ruby._gem_dir.cache_clear()
 
 
 def test_ruby_old_version_names_read_the_dry_run() -> None:
@@ -69,17 +63,17 @@ def test_ruby_old_version_names_drop_repeats() -> None:
     assert ruby._old_version_names(output) == ["rake-13.0.6"]
 
 
-def test_ruby_available_when_user_owns_gem_dir(tmp_path: Path, mocker: MockerFixture) -> None:
+def test_ruby_runs_when_user_owns_gem_dir(tmp_path: Path, mocker: MockerFixture) -> None:
     """Verify a GEM_HOME the user owns, as a version manager creates, is cleaned."""
     # Given
     _mock_gem(mocker, tmp_path)
     mocker.patch("purger.plugins.ruby.invoking_home", return_value=tmp_path)
 
     # When / Then
-    assert ruby._is_available() is True
+    assert ruby.gem_directory_is_owned_by_user() is True
 
 
-def test_ruby_unavailable_when_gem_dir_owned_by_another_user(
+def test_ruby_skipped_when_gem_dir_owned_by_another_user(
     tmp_path: Path, mocker: MockerFixture
 ) -> None:
     """Verify a system Ruby's root-owned GEM_HOME is skipped, since cleaning it needs sudo."""
@@ -88,19 +82,19 @@ def test_ruby_unavailable_when_gem_dir_owned_by_another_user(
     mocker.patch("purger.plugins.ruby.invoking_home", return_value=tmp_path)
 
     # When / Then
-    assert ruby._is_available() is False
+    assert ruby.gem_directory_is_owned_by_user() is False
 
 
-def test_ruby_unavailable_when_gem_dir_missing(tmp_path: Path, mocker: MockerFixture) -> None:
-    """Verify a GEM_HOME that does not exist yet leaves the plugin unavailable."""
+def test_ruby_skipped_when_gem_dir_missing(tmp_path: Path, mocker: MockerFixture) -> None:
+    """Verify a GEM_HOME that does not exist yet skips the plugin."""
     # Given
     _mock_gem(mocker, tmp_path / "missing")
 
     # When / Then
-    assert ruby._is_available() is False
+    assert ruby.gem_directory_is_owned_by_user() is False
 
 
-def test_ruby_unavailable_when_gem_query_fails(mocker: MockerFixture) -> None:
+def test_ruby_skipped_when_gem_query_fails(mocker: MockerFixture) -> None:
     """Verify a failed `gem env gemdir` skips the plugin instead of raising."""
     # Given
     mocker.patch(
@@ -110,11 +104,11 @@ def test_ruby_unavailable_when_gem_query_fails(mocker: MockerFixture) -> None:
     )
 
     # When / Then
-    assert ruby._is_available() is False
+    assert ruby.gem_directory_is_owned_by_user() is False
 
 
 def test_ruby_measures_only_old_versions(tmp_path: Path, mocker: MockerFixture) -> None:
-    """Verify the action sizes every file of the old versions and the footprint is all of GEM_HOME."""
+    """Verify the action sizes every file of the old versions and the total size is all of GEM_HOME."""
     # Given two old versions and one current version
     _install_gem(tmp_path, "rake-13.0.6", 10_000)
     _install_gem(tmp_path, "nokogiri-1.15.0-arm64-darwin", 20_000)
@@ -137,7 +131,7 @@ def test_ruby_measures_only_old_versions(tmp_path: Path, mocker: MockerFixture) 
     assert len(action.resolved_paths) == 8
     assert current.isdisjoint(action.resolved_paths)
     assert action.size_bytes == disk_usage(action.resolved_paths)
-    assert report.footprint_bytes == disk_usage([tmp_path])
+    assert report.total_size_bytes == disk_usage([tmp_path])
 
 
 def test_ruby_measures_zero_when_nothing_is_old(tmp_path: Path, mocker: MockerFixture) -> None:
@@ -158,7 +152,7 @@ def test_ruby_measures_zero_when_nothing_is_old(tmp_path: Path, mocker: MockerFi
 
 
 @pytest.mark.parametrize(
-    ("argv", "busy"),
+    ("argv", "running"),
     [
         (["gem", "install", "rails"], True),
         (["/usr/bin/ruby", "/usr/local/bin/bundle", "install"], True),
@@ -167,11 +161,11 @@ def test_ruby_measures_zero_when_nothing_is_old(tmp_path: Path, mocker: MockerFi
         (["gemini"], False),
     ],
 )
-def test_ruby_busy_while_gem_or_bundler_runs(argv: list[str], *, busy: bool) -> None:
+def test_ruby_skipped_while_gem_or_bundler_runs(argv: list[str], *, running: bool) -> None:
     """Verify a running gem or Bundler pauses cleanup, and other Ruby programs do not."""
     # When / Then
-    assert ruby.PLUGIN.busy_process is not None
-    assert ruby.PLUGIN.busy_process(argv) is busy
+    assert ruby.PLUGIN.skip_while_running is not None
+    assert ruby.PLUGIN.skip_while_running(argv) is running
 
 
 def test_ruby_gem_dir_resolves_symlinks(tmp_path: Path, mocker: MockerFixture) -> None:
@@ -184,4 +178,33 @@ def test_ruby_gem_dir_resolves_symlinks(tmp_path: Path, mocker: MockerFixture) -
     _mock_gem(mocker, link)
 
     # When / Then
-    assert ruby._gem_dir() == real
+    assert ruby._gem_directory() == real
+
+
+def test_ruby_asks_for_the_gem_directory_once_per_command(
+    tmp_path: Path, mocker: MockerFixture
+) -> None:
+    """Verify the availability check and the total size share one `gem env gemdir` run."""
+    # Given
+    _install_gem(tmp_path, "rake-13.2.1", 50_000)
+    gem = mocker.patch(
+        "purger.plugins.ruby.run_command",
+        autospec=True,
+        side_effect=lambda argv, **_: make_completed(
+            stdout=f"{tmp_path}\n" if tuple(argv) == ruby.GEM_DIRECTORY_COMMAND else ""
+        ),
+    )
+
+    # When
+    assert ruby.PLUGIN.skip_unless is not None
+    ruby.PLUGIN.skip_unless()
+    report = measure_plugin(
+        ruby.PLUGIN, include_dangerous=False, settings=Config().settings_for(ruby.PLUGIN)
+    )
+
+    # Then
+    asked = [
+        call for call in gem.call_args_list if tuple(call.args[0]) == ruby.GEM_DIRECTORY_COMMAND
+    ]
+    assert len(asked) == 1
+    assert report.total_size_bytes == disk_usage([tmp_path])

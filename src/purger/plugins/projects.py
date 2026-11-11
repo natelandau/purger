@@ -2,14 +2,25 @@
 
 import time
 from collections import Counter
-from functools import partial
+from collections.abc import Mapping
 from pathlib import Path
 
 from nclutils import pp
 
-from purger.config import PluginSettings
 from purger.details import tilde
-from purger.plugin import Action, Detail, PathSizes, Plugin, Setting, SettingValue, Tier
+from purger.plugin import (
+    Action,
+    DeletePaths,
+    PathSizes,
+    Plugin,
+    PluginSettings,
+    RiskLevel,
+    Setting,
+    SettingValue,
+    SizeBreakdownRow,
+    at_least,
+    once_per_run,
+)
 from purger.plugins._projects_scan import Category, ScanOptions, project_folder, scan
 from purger.safety import invoking_home, resolve_home_folder
 
@@ -27,7 +38,7 @@ def _is_path_entry(stripped: str) -> bool:
     return "/" in stripped or stripped.startswith("~")
 
 
-def _check_no_slash(value: SettingValue) -> None:
+def reject_entries_with_a_slash(value: SettingValue) -> None:
     """Reject include entries that name more than a single folder.
 
     Args:
@@ -42,7 +53,7 @@ def _check_no_slash(value: SettingValue) -> None:
             raise ValueError(msg)
 
 
-def _check_exclude(value: SettingValue) -> None:
+def reject_relative_exclude_entries(value: SettingValue) -> None:
     """Reject exclude entries that are neither a folder name nor an absolute or home path.
 
     A relative path would resolve against the current directory, so it is refused.
@@ -73,21 +84,6 @@ def _split_exclude(
         else:
             names.append(stripped)
     return tuple(paths), tuple(names)
-
-
-def _check_at_least(minimum: int, value: SettingValue) -> None:
-    """Reject a number below the minimum.
-
-    Args:
-        minimum: The smallest accepted value.
-        value: The configured value.
-
-    Raises:
-        ValueError: If the value is not an integer of at least the minimum.
-    """
-    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
-        msg = f"must be at least {minimum}"
-        raise ValueError(msg)
 
 
 def _expand(raw: str, home: Path) -> Path:
@@ -126,37 +122,69 @@ def _roots(entries: tuple[str, ...], home: Path, *, warn: bool = True) -> tuple[
     return tuple(root for root in kept if not any(other in root.parents for other in kept))
 
 
-def _prepare(settings: PluginSettings) -> dict[str, tuple[Path, ...]] | None:
-    """Scan the project roots once so every action shares the result.
+def has_usable_project_folder(settings: PluginSettings) -> bool:
+    """Report whether at least one configured project folder can be scanned.
+
+    Warns once about each rejected folder, since this check runs once per command.
 
     Args:
         settings: The plugin's settings for this run.
 
     Returns:
-        dict[str, tuple[Path, ...]] | None: The folders each action offers, by
-            action name, or None when no usable root is set.
+        bool: False when no home folder is known or every configured folder is rejected.
     """
     try:
         home = invoking_home().resolve()
     except RuntimeError:
-        # Without a home folder no root can be inside it.
-        return None
-    roots = _roots(settings.str_list("paths"), home=home)
-    if not roots:
-        return None
-    exclude_paths, exclude_names = _split_exclude(entries=settings.str_list("exclude"), home=home)
+        return False
+    return bool(_roots(settings.get_string_list("paths"), home=home))
+
+
+@once_per_run
+def project_folders(settings: PluginSettings) -> Mapping[Category, list[Path]]:
+    """Scan the project roots once per run, so every action shares the result.
+
+    Args:
+        settings: The plugin's settings for this run.
+
+    Returns:
+        Mapping[Category, list[Path]]: The folders found in each category.
+    """
+    home = invoking_home().resolve()
+    exclude_paths, exclude_names = _split_exclude(
+        entries=settings.get_string_list("exclude"), home=home
+    )
     options = ScanOptions(
-        roots=roots,
-        max_depth=settings.integer("max_depth"),
-        recent_days=settings.integer("recent_days"),
+        # The configuration check already warned about each rejected path.
+        roots=_roots(settings.get_string_list("paths"), home=home, warn=False),
+        max_depth=settings.get_integer("max_depth"),
+        recent_days=settings.get_integer("recent_days"),
         exclude_paths=exclude_paths,
         exclude_names=exclude_names,
-        include=settings.str_list("include"),
+        include=settings.get_string_list("include"),
         now=time.time(),
     )
-    found = scan(options)
-    # Each category's value is the name of the action that offers it.
-    return {category.value: tuple(found.get(category, ())) for category in Category}
+    return scan(options)
+
+
+def project_caches(settings: PluginSettings) -> tuple[Path, ...]:
+    """Return the tool caches the scan found, such as `.mypy_cache`."""
+    return tuple(project_folders(settings).get(Category.CACHES, ()))
+
+
+def project_dependencies(settings: PluginSettings) -> tuple[Path, ...]:
+    """Return the installed dependencies the scan found, such as `node_modules`."""
+    return tuple(project_folders(settings).get(Category.DEPENDENCIES, ()))
+
+
+def project_builds(settings: PluginSettings) -> tuple[Path, ...]:
+    """Return the build output the scan found, such as `target`."""
+    return tuple(project_folders(settings).get(Category.BUILDS, ()))
+
+
+def project_custom_folders(settings: PluginSettings) -> tuple[Path, ...]:
+    """Return the folders the scan found that the `include` setting names."""
+    return tuple(project_folders(settings).get(Category.CUSTOM, ()))
 
 
 def _items(paths: list[Path]) -> tuple[str, ...]:
@@ -165,7 +193,7 @@ def _items(paths: list[Path]) -> tuple[str, ...]:
     return tuple(name if n == 1 else f"{n} {name}" for name, n in sorted(counts.items()))
 
 
-def _details(sizes: PathSizes, settings: PluginSettings) -> list[Detail]:
+def one_row_per_project(sizes: PathSizes, settings: PluginSettings) -> list[SizeBreakdownRow]:
     """Group the found folders by project, so a person can see which projects a clean touches.
 
     With one root, labels are relative to it. With several, labels are home
@@ -176,26 +204,26 @@ def _details(sizes: PathSizes, settings: PluginSettings) -> list[Detail]:
         settings: The plugin's settings for this run.
 
     Returns:
-        list[Detail]: One row per project.
+        list[SizeBreakdownRow]: One row per project.
     """
-    roots = _roots(settings.str_list("paths"), home=invoking_home().resolve(), warn=False)
+    roots = _roots(settings.get_string_list("paths"), home=invoking_home().resolve(), warn=False)
     groups: dict[Path, list[Path]] = {}
     for path in sizes:
         root = max((r for r in roots if r in path.parents), key=lambda r: len(r.parts))
         groups.setdefault(project_folder(path, root), []).append(path)
-    rows: list[Detail] = []
+    rows: list[SizeBreakdownRow] = []
     for project, paths in groups.items():
         if len(roots) > 1:
             label = tilde(project)
         else:
             label = str(project.relative_to(roots[0])) if project != roots[0] else project.name
         rows.append(
-            Detail(
+            SizeBreakdownRow(
                 label=label,
                 size_bytes=sum(sizes[path] for path in paths),
-                items=_items(paths),
+                item_names=_items(paths),
                 paths=tuple(sorted(paths)),
-                key=str(project),
+                merge_key=str(project),
             )
         )
     return rows
@@ -204,71 +232,72 @@ def _details(sizes: PathSizes, settings: PluginSettings) -> list[Detail]:
 PLUGIN = Plugin(
     name="projects",
     description="Tool caches and build leftovers inside your projects",
+    skip_unless_configured=has_usable_project_folder,
     settings=(
         Setting(
             name="paths",
-            kind="str_list",
-            default=(),
-            help="Folders that hold your projects. Each must be inside your home folder.",
+            value_type=list[str],
+            default=[],
+            description="Folders that hold your projects. Each must be inside your home folder.",
+            required=True,
         ),
         Setting(
             name="max_depth",
-            kind="int",
+            value_type=int,
             default=6,
-            help="How many folder levels below each path to search.",
-            check=partial(_check_at_least, 1),
+            description="How many folder levels below each path to search.",
+            validate=at_least(1),
         ),
         Setting(
             name="recent_days",
-            kind="int",
+            value_type=int,
             default=7,
-            help="Leave a project alone when a file in it changed this many days ago or fewer. 0 turns the check off.",
-            check=partial(_check_at_least, 0),
+            description="Leave a project alone when a file in it changed this many days ago or fewer. 0 turns the check off.",
+            validate=at_least(0),
         ),
         Setting(
             name="exclude",
-            kind="str_list",
-            default=(),
-            help="Folder names, patterns, or absolute paths that purger never removes or searches for leftovers. A path starts with / or ~/.",
-            check=_check_exclude,
+            value_type=list[str],
+            default=[],
+            description="Folder names, patterns, or absolute paths that purger never removes or searches for leftovers. A path starts with / or ~/.",
+            validate=reject_relative_exclude_entries,
         ),
         Setting(
             name="include",
-            kind="str_list",
-            default=(),
-            help="Extra folder names or patterns, such as *.generated, to offer for removal. No slashes.",
-            check=_check_no_slash,
+            value_type=list[str],
+            default=[],
+            description="Extra folder names or patterns, such as *.generated, to offer for removal. No slashes.",
+            validate=reject_entries_with_a_slash,
         ),
     ),
-    prepare=_prepare,
     actions=(
         Action(
             name="caches",
-            tier=Tier.SAFE,
-            help="Remove tool caches in your projects, such as .mypy_cache and __pycache__. Tools rebuild them on their next run.",
-            prepared=True,
-            details=_details,
+            risk_level=RiskLevel.SAFE,
+            description="Remove tool caches in your projects, such as .mypy_cache and __pycache__. Tools rebuild them on their next run.",
+            cleanup=DeletePaths(found_by=project_caches),
+            size_breakdown=one_row_per_project,
         ),
         Action(
             name="dependencies",
-            tier=Tier.CAUTION,
-            help="Remove installed dependencies, such as node_modules and .venv, from projects untouched for a while. Reinstall them before you work on a project again.",
-            prepared=True,
-            details=_details,
+            risk_level=RiskLevel.CAUTION,
+            description="Remove installed dependencies, such as node_modules and .venv, from projects untouched for a while. Reinstall them before you work on a project again.",
+            cleanup=DeletePaths(found_by=project_dependencies),
+            size_breakdown=one_row_per_project,
         ),
         Action(
             name="builds",
-            tier=Tier.CAUTION,
-            help="Remove build output, such as target and dist, from projects untouched for a while. The next build starts from scratch.",
-            prepared=True,
-            details=_details,
+            risk_level=RiskLevel.CAUTION,
+            description="Remove build output, such as target and dist, from projects untouched for a while. The next build starts from scratch.",
+            cleanup=DeletePaths(found_by=project_builds),
+            size_breakdown=one_row_per_project,
         ),
         Action(
             name="custom",
-            tier=Tier.CAUTION,
-            help="Remove the folders named in the include setting. purger cannot tell how costly they are to rebuild.",
-            prepared=True,
-            details=_details,
+            risk_level=RiskLevel.CAUTION,
+            description="Remove the folders named in the include setting. purger cannot tell how costly they are to rebuild.",
+            cleanup=DeletePaths(found_by=project_custom_folders),
+            size_breakdown=one_row_per_project,
         ),
     ),
 )

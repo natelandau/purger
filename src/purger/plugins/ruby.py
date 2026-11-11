@@ -3,37 +3,68 @@
 import glob
 import logging
 import re
-from functools import cache
 from pathlib import Path
 
 from nclutils.sh import ShellCommandError, run_command
 
-from purger.plugin import Action, Plugin, Tier
-from purger.plugins._shared import program_matcher
+from purger.plugin import (
+    Action,
+    Plugin,
+    PluginSettings,
+    RiskLevel,
+    RunCommand,
+    SizeComputedBy,
+    SizeOfPaths,
+    once_per_run,
+    program_matching,
+)
 from purger.safety import invoking_home
-from purger.sizing import SIZE_CMD_TIMEOUT_SECONDS, printed_dir, printed_dir_usage
+from purger.sizing import (
+    SIZE_COMMAND_TIMEOUT_SECONDS,
+    disk_usage,
+    expand_paths,
+    printed_directory,
+)
 
 logger = logging.getLogger(__name__)
 
-_GEM_DIR_CMD = ("gem", "env", "gemdir")
+GEM_DIRECTORY_COMMAND = ("gem", "env", "gemdir")
 # A `gem: --user-install` line in .gemrc would otherwise point cleanup at ~/.gem, not GEM_HOME.
-_CLEANUP_CMD = ("gem", "cleanup", "--no-user-install")
+GEM_CLEANUP_COMMAND = ("gem", "cleanup", "--no-user-install")
 _WOULD_UNINSTALL = re.compile(r"^Dry Run Mode: Would uninstall (\S+)$", re.MULTILINE)
 
 
-@cache
-def _gem_dir() -> Path:
-    """Ask RubyGems for the GEM_HOME of the active Ruby, once per run.
+# The plugin declares no settings, so every caller shares this one lookup.
+_NO_SETTINGS = PluginSettings(plugin="ruby", values={})
+
+
+@once_per_run
+def _ask_rubygems_for_gem_directory(settings: PluginSettings) -> Path:  # noqa: ARG001
+    """Run `gem env gemdir` and read the folder it prints."""
+    output = run_command(list(GEM_DIRECTORY_COMMAND), timeout=SIZE_COMMAND_TIMEOUT_SECONDS).stdout
+    return printed_directory(output, single_line=True)
+
+
+def _gem_directory() -> Path:
+    """Ask RubyGems for the GEM_HOME of the active Ruby, once per purger command.
 
     Returns:
         Path: The active Ruby's GEM_HOME with symlinks resolved, so its files are
             measured at the real paths `gem cleanup` removes.
     """
-    output = run_command(list(_GEM_DIR_CMD), timeout=SIZE_CMD_TIMEOUT_SECONDS).stdout
-    return printed_dir(output, single_line=True)
+    return _ask_rubygems_for_gem_directory(_NO_SETTINGS)
 
 
-def _is_available() -> bool:
+def gem_directory_size() -> int:
+    """Measure the active Ruby's GEM_HOME.
+
+    Returns:
+        int: Allocated bytes, or 0 when the folder does not exist.
+    """
+    return disk_usage([_gem_directory()])
+
+
+def gem_directory_is_owned_by_user() -> bool:
     """Report whether the active Ruby keeps its gems in a folder the user owns.
 
     A system Ruby, such as macOS's `/Library/Ruby/Gems`, is owned by root and
@@ -44,7 +75,7 @@ def _is_available() -> bool:
             user's home directory.
     """
     try:
-        gem_dir = _gem_dir()
+        gem_dir = _gem_directory()
         return gem_dir.is_dir() and gem_dir.owner() == invoking_home().owner()
     except (
         ShellCommandError,
@@ -93,42 +124,46 @@ def _gem_patterns(gem_dir: Path, full_name: str) -> tuple[str, ...]:
     )
 
 
-def _old_version_paths() -> tuple[str, ...]:
-    """List the files of every gem version `gem cleanup` would remove.
+def find_old_gem_files(settings: PluginSettings) -> list[Path]:  # noqa: ARG001
+    """Find the files of every gem version `gem cleanup` would remove.
+
+    Args:
+        settings: The plugin's settings, which this plugin does not use.
 
     Returns:
-        tuple[str, ...]: Glob-safe patterns for each old version's files.
+        list[Path]: The existing files and folders of each old version.
     """
-    gem_dir = _gem_dir()
+    gem_dir = _gem_directory()
     # `-n` is the dry-run flag in every RubyGems release; `--dryrun` is deprecated.
-    output = run_command([*_CLEANUP_CMD, "-n"], timeout=SIZE_CMD_TIMEOUT_SECONDS).stdout
-    return tuple(
-        pattern
-        for full_name in _old_version_names(output)
-        for pattern in _gem_patterns(gem_dir=gem_dir, full_name=full_name)
+    output = run_command([*GEM_CLEANUP_COMMAND, "-n"], timeout=SIZE_COMMAND_TIMEOUT_SECONDS).stdout
+    return expand_paths(
+        tuple(
+            pattern
+            for full_name in _old_version_names(output)
+            for pattern in _gem_patterns(gem_dir=gem_dir, full_name=full_name)
+        )
     )
 
 
 PLUGIN = Plugin(
     name="ruby",
     description="Old versions of installed Ruby gems",
-    requires="gem",
-    is_available=_is_available,
+    requires_on_path="gem",
+    skip_unless=gem_directory_is_owned_by_user,
     # Bundler installs into the same GEM_HOME that `gem cleanup` removes from.
-    busy_process=program_matcher(r"gem|bundler?"),
-    size_cmd=_GEM_DIR_CMD,
-    parse_size=printed_dir_usage,
+    skip_while_running=program_matching(r"gem|bundler?"),
+    total_size=SizeComputedBy(gem_directory_size),
     actions=(
         Action(
             name="old-versions",
-            tier=Tier.CAUTION,
-            help=(
+            risk_level=RiskLevel.CAUTION,
+            description=(
                 "Remove every gem version older than the newest that no installed gem "
                 "needs. A project whose Gemfile.lock pins an older version needs "
                 "`bundle install` again."
             ),
-            command=_CLEANUP_CMD,
-            paths=_old_version_paths,
+            cleanup=RunCommand(*GEM_CLEANUP_COMMAND),
+            size=SizeOfPaths(found_by=find_old_gem_files),
         ),
     ),
 )

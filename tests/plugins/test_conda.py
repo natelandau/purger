@@ -12,10 +12,10 @@ def test_conda_counts_tarballs_and_unused_packages() -> None:
     )
 
     # When / Then
-    assert conda._reclaimable_bytes(output) == 3500
+    assert conda.reclaimable_bytes(output) == 3500
 
 
 def test_conda_size_without_package_sections_is_zero() -> None:
     """Verify a report that holds only unsized parts measures as zero."""
     # Given / When / Then
-    assert conda._reclaimable_bytes('{"success": true, "logfiles": []}') == 0
+    assert conda.reclaimable_bytes('{"success": true, "logfiles": []}') == 0

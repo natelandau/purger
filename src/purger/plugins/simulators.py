@@ -1,21 +1,29 @@
 """Plugin for iOS and other Apple simulators that the installed Xcode cannot run."""
 
-import glob
 import json
-from functools import cache
 from pathlib import Path
 
 from nclutils.sh import run_command
 
-from purger.config import PluginSettings
 from purger.details import tilde
-from purger.plugin import Action, Detail, PathSizes, Plugin, Tier
+from purger.plugin import (
+    Action,
+    OperatingSystem,
+    PathSizes,
+    Plugin,
+    PluginSettings,
+    RiskLevel,
+    RunCommand,
+    SizeBreakdownRow,
+    SizeOfPaths,
+    once_per_run,
+)
 from purger.runner import command_succeeds
 
-_LIST_CMD = ["xcrun", "simctl", "list", "devices", "--json"]
+LIST_DEVICES_COMMAND = ("xcrun", "simctl", "list", "devices", "--json")
 
 
-def _is_available() -> bool:
+def xcode_first_launch_is_complete() -> bool:
     """Report whether Xcode finished its first-launch setup.
 
     Before that setup, any simctl call makes macOS ask for an administrator
@@ -32,7 +40,7 @@ def _is_available() -> bool:
     )
 
 
-def _unavailable_devices(listing: str) -> dict[Path, str]:
+def parse_unavailable_devices(listing: str) -> dict[Path, str]:
     """Return the folders of the devices that simctl marks unavailable, with their labels.
 
     Args:
@@ -46,53 +54,64 @@ def _unavailable_devices(listing: str) -> dict[Path, str]:
     return {
         Path(
             str(device["dataPath"])
-        ).parent: f"{device.get('name', 'Unknown')} ({_runtime_name(runtime)})"
+        ).parent: f"{device.get('name', 'Unknown')} ({runtime_name(runtime)})"
         for runtime, devices in runtimes.items()
         for device in devices
         if device.get("isAvailable") is False and device.get("dataPath")
     }
 
 
-def _runtime_name(key: str) -> str:
+def runtime_name(key: str) -> str:
     """Turn a runtime key such as `com.apple.CoreSimulator.SimRuntime.iOS-17-5` into `iOS 17.5`."""
     _, _, short = key.rpartition("SimRuntime.")
     system, _, version = short.partition("-")
     return f"{system} {version.replace('-', '.')}".strip()
 
 
-@cache
-def _unavailable_labels() -> dict[Path, str]:
-    """Ask simctl for the unavailable devices once per run, since paths and details both need them.
+@once_per_run
+def unavailable_device_labels(settings: PluginSettings) -> dict[Path, str]:  # noqa: ARG001
+    """Ask simctl for the unavailable devices once per run, since the size and its breakdown both need them.
+
+    Args:
+        settings: The plugin's settings, which this plugin does not use.
 
     Returns:
         dict[Path, str]: Each unavailable device's folder mapped to its label.
     """
-    return _unavailable_devices(run_command(_LIST_CMD, timeout=30).stdout)
+    return parse_unavailable_devices(run_command(list(LIST_DEVICES_COMMAND), timeout=30).stdout)
 
 
-def _unavailable_device_paths() -> tuple[str, ...]:
+def find_unavailable_device_folders(settings: PluginSettings) -> list[Path]:
     """List the folders `simctl delete unavailable` removes, so purger can size and show them.
 
+    Args:
+        settings: The plugin's settings for this run.
+
     Returns:
-        tuple[str, ...]: Each unavailable device's folder, escaped so glob characters match literally.
+        list[Path]: Each unavailable device's folder.
     """
-    return tuple(glob.escape(str(path)) for path in _unavailable_labels())
+    return list(unavailable_device_labels(settings))
 
 
-def _details(sizes: PathSizes, settings: PluginSettings) -> list[Detail]:  # noqa: ARG001
+def one_row_per_device(sizes: PathSizes, settings: PluginSettings) -> list[SizeBreakdownRow]:
     """Label each unavailable device by name and runtime.
 
     Args:
         sizes: Each device folder's measured size.
-        settings: The plugin's settings for this run, unused.
+        settings: The plugin's settings for this run.
 
     Returns:
-        list[Detail]: One row per device.
+        list[SizeBreakdownRow]: One row per device.
     """
-    labels = _unavailable_labels() if sizes else {}
+    labels = unavailable_device_labels(settings) if sizes else {}
     # Keyed by folder, so two devices with the same name and runtime stay apart.
     return [
-        Detail(label=labels.get(path) or tilde(path), size_bytes=size, paths=(path,), key=str(path))
+        SizeBreakdownRow(
+            label=labels.get(path) or tilde(path),
+            size_bytes=size,
+            paths=(path,),
+            merge_key=str(path),
+        )
         for path, size in sizes.items()
     ]
 
@@ -100,20 +119,20 @@ def _details(sizes: PathSizes, settings: PluginSettings) -> list[Detail]:  # noq
 PLUGIN = Plugin(
     name="simulators",
     description="Simulator devices the installed Xcode cannot run",
-    platforms=frozenset({"darwin"}),
-    requires="xcodebuild",
-    is_available=_is_available,
+    operating_systems=(OperatingSystem.MACOS,),
+    requires_on_path="xcodebuild",
+    skip_unless=xcode_first_launch_is_complete,
     actions=(
         Action(
             name="unavailable",
-            tier=Tier.SAFE,
-            help=(
+            risk_level=RiskLevel.SAFE,
+            description=(
                 "Remove simulator devices whose runtime the installed Xcode no longer "
                 "supports, along with their data. They cannot boot anyway."
             ),
-            command=("xcrun", "simctl", "delete", "unavailable"),
-            paths=_unavailable_device_paths,
-            details=_details,
+            cleanup=RunCommand("xcrun", "simctl", "delete", "unavailable"),
+            size=SizeOfPaths(found_by=find_unavailable_device_folders),
+            size_breakdown=one_row_per_device,
         ),
     ),
 )

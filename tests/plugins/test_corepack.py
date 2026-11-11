@@ -22,4 +22,4 @@ def test_corepack_home(monkeypatch: pytest.MonkeyPatch, env: dict[str, str], exp
         monkeypatch.setenv(name, value)
 
     # When / Then
-    assert corepack._home() == expected
+    assert corepack.corepack_home_directory() == expected
