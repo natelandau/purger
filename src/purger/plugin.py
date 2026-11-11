@@ -72,6 +72,9 @@ class Plugin:
     and lets purger skip plugins that do not apply to the host. A plugin
     sizes itself with the first of `size`, `size_cmd`, or `paths` that is
     set; with none, its footprint is the sum of its actions' sizes.
+    Set `busy_process` to a check that matches a process argv running the
+    tool; the plugin is skipped while one runs, since a live run may be using
+    the files a cleanup would remove. purger's own subprocesses never count.
 
     Raises:
         ValueError: If the name is not kebab-case, there are no actions,
@@ -88,6 +91,7 @@ class Plugin:
     parse_size: Callable[[str], int] | None = None
     size: Callable[[], int | None] | None = None
     is_available: Callable[[], bool] | None = None
+    busy_process: Callable[[list[str]], bool] | None = None
 
     def __post_init__(self) -> None:
         """Validate the plugin's invariants."""

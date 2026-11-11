@@ -575,23 +575,11 @@ def test_rip2_measures_printed_graveyard(tmp_path: Path, mocker: MockerFixture) 
     assert report.footprint_bytes == disk_usage([tmp_path])
 
 
-@pytest.mark.parametrize(
-    ("leftover", "cmdline", "expected"),
-    [
-        (True, ["/usr/bin/python3", "/Users/me/.local/bin/purger", "clean", "ansible"], True),
-        (False, ["/bin/zsh"], False),
-        (True, ["/usr/bin/python3", "/Users/me/.local/bin/ansible-playbook", "site.yml"], False),
-    ],
-    ids=["idle-with-leftovers", "nothing-to-clean", "ansible-running"],
-)
-def test_ansible_available_only_when_idle_with_leftovers(
-    leftover: bool,
-    cmdline: list[str],
-    expected: bool,
-    tmp_path: Path,
-    mocker: MockerFixture,
+@pytest.mark.parametrize("leftover", [True, False], ids=["leftovers", "nothing-to-clean"])
+def test_ansible_available_only_with_leftovers(
+    leftover: bool, tmp_path: Path, mocker: MockerFixture
 ) -> None:
-    """Verify the plugin applies only with leftovers to clean and no ansible process using them."""
+    """Verify the plugin applies only with leftovers to clean."""
     # Given
     if leftover:
         stale = tmp_path / ".ansible" / "tmp" / "ansible-tmp-1747399837.59-86917-2270"
@@ -599,12 +587,16 @@ def test_ansible_available_only_when_idle_with_leftovers(
     mocker.patch("purger.sizing.invoking_home", return_value=tmp_path)
     mocker.patch.object(ansible, "_TMP_PATHS", ("~/.ansible/tmp/*",))
     mocker.patch.object(ansible, "_GALAXY_PATHS", ("~/.ansible/galaxy_cache/*",))
-    process = mocker.Mock(info={"cmdline": cmdline})
-    mocker.patch("purger.plugins._shared.psutil.process_iter", return_value=[process])
     assert ansible.PLUGIN.is_available is not None
 
     # When / Then
-    assert ansible.PLUGIN.is_available() is expected
+    assert ansible.PLUGIN.is_available() is leftover
+
+
+def test_ansible_skips_while_ansible_runs() -> None:
+    """Verify a running ansible command makes the plugin busy."""
+    # When / Then
+    assert ansible.PLUGIN.busy_process is ansible._is_ansible_command
 
 
 @pytest.mark.parametrize(
@@ -728,35 +720,37 @@ def test_maestro_output_follows_xdg_state_home(
     assert maestro._test_output_patterns() == expected
 
 
-@pytest.mark.parametrize(
-    ("has_output", "cmdline", "expected"),
-    [
-        (True, ["/bin/zsh"], True),
-        (False, ["/bin/zsh"], False),
-        (True, ["/usr/bin/java", "-classpath", "/x/lib/*", "maestro.cli.AppKt", "test"], False),
-        (True, None, True),
-    ],
-    ids=["idle-with-output", "nothing-to-clean", "maestro-running", "unreadable-argv"],
-)
-def test_maestro_available_only_when_idle_with_output(
-    has_output: bool,
-    cmdline: list[str] | None,
-    expected: bool,
-    tmp_path: Path,
-    mocker: MockerFixture,
+@pytest.mark.parametrize("has_output", [True, False], ids=["output", "nothing-to-clean"])
+def test_maestro_available_only_with_output(
+    has_output: bool, tmp_path: Path, mocker: MockerFixture
 ) -> None:
-    """Verify the plugin applies only with output to clean and no Maestro run writing to it."""
+    """Verify the plugin applies only with run output to clean."""
     # Given
     if has_output:
         (tmp_path / ".maestro" / "tests" / "2026-11-10_041643").mkdir(parents=True)
     mocker.patch("purger.sizing.invoking_home", return_value=tmp_path)
     mocker.patch.object(maestro, "_TEST_OUTPUT_PATHS", ("~/.maestro/tests/*",))
-    process = mocker.Mock(info={"cmdline": cmdline})
-    mocker.patch("purger.plugins._shared.psutil.process_iter", return_value=[process])
     assert maestro.PLUGIN.is_available is not None
 
     # When / Then
-    assert maestro.PLUGIN.is_available() is expected
+    assert maestro.PLUGIN.is_available() is has_output
+
+
+@pytest.mark.parametrize(
+    ("cmdline", "expected"),
+    [
+        (["/usr/bin/java", "-classpath", "/x/lib/*", "maestro.cli.AppKt", "test"], True),
+        (["/bin/zsh"], False),
+    ],
+    ids=["maestro", "other"],
+)
+def test_maestro_busy_while_maestro_runs(cmdline: list[str], expected: bool) -> None:
+    """Verify only a Maestro JVM process makes the plugin busy."""
+    # Given
+    assert maestro.PLUGIN.busy_process is not None
+
+    # When / Then
+    assert maestro.PLUGIN.busy_process(cmdline) is expected
 
 
 @pytest.mark.parametrize(

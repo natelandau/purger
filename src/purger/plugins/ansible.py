@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 
 from purger.plugin import Action, Plugin, Tier
-from purger.plugins._shared import env_dir, process_running
+from purger.plugins._shared import env_dir
 from purger.sizing import expand_paths
 
 
@@ -50,21 +50,20 @@ def _is_ansible_command(cmdline: list[str]) -> bool:
     )
 
 
-def _is_available() -> bool:
-    """Report whether there is something to clean and no ansible run that could be using it.
+def _has_leftovers() -> bool:
+    """Report whether there are temp folders or Galaxy responses to clean.
 
     Returns:
-        bool: True when a cache path has contents and no ansible process is running.
+        bool: True when a cache path has contents.
     """
-    return bool(expand_paths(_TMP_PATHS + _GALAXY_PATHS)) and not process_running(
-        _is_ansible_command
-    )
+    return bool(expand_paths(_TMP_PATHS + _GALAXY_PATHS))
 
 
 PLUGIN = Plugin(
     name="ansible",
     description="Ansible leftover temp folders and Galaxy cache",
-    is_available=_is_available,
+    is_available=_has_leftovers,
+    busy_process=_is_ansible_command,
     actions=(
         Action(
             name="tmp",

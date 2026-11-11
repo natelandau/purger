@@ -4,10 +4,11 @@ import importlib
 import logging
 import pkgutil
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from functools import cache
 from types import ModuleType
 
+import psutil
 from nclutils.sh import which
 
 from purger import plugins as _builtin_plugins
@@ -80,27 +81,63 @@ def _discover(package: ModuleType) -> dict[str, Plugin]:
 def skip_reason(plugin: Plugin, *, check_available: bool = True) -> SkipReason | None:
     """Return why a plugin does not apply to this machine, or None if it does.
 
-    Checks run cheapest first: platform, required binary, then the plugin's
-    own availability hook.
+    Checks run cheapest first: platform, required binary, the plugin's own
+    availability hook, then a scan for a running copy of its tool.
 
     Args:
         plugin: Plugin to check.
-        check_available: Run the plugin's `is_available` hook. Disable to avoid its cost.
+        check_available: Run the availability hook and the process scan. Disable to avoid their cost.
     """
     if sys.platform not in plugin.platforms:
         return SkipReason.PLATFORM
     if plugin.requires is not None and which(plugin.requires) is None:
         return SkipReason.MISSING_BINARY
-    if check_available and plugin.is_available is not None:
-        try:
-            available = plugin.is_available()
-        except Exception as exc:  # noqa: BLE001
-            # Plugin-supplied code must not abort the whole run.
-            logger.debug("is_available for %s failed: %s", plugin.name, exc)
-            return SkipReason.UNAVAILABLE
-        if not available:
-            return SkipReason.UNAVAILABLE
+    if check_available and not _usable_now(plugin):
+        return SkipReason.UNAVAILABLE
     return None
+
+
+def _usable_now(plugin: Plugin) -> bool:
+    """Report whether the plugin's availability hook passes and its tool is not running."""
+    try:
+        if plugin.is_available is not None and not plugin.is_available():
+            return False
+        return plugin.busy_process is None or not _tool_running(plugin.busy_process)
+    except Exception as exc:  # noqa: BLE001
+        # Plugin-supplied code and the process scan must not abort the whole run.
+        logger.debug("availability check for %s failed: %s", plugin.name, exc)
+        return False
+
+
+def _tool_running(matches: Callable[[list[str]], bool]) -> bool:
+    """Report whether a process outside purger's own subprocesses satisfies a check.
+
+    Args:
+        matches: Receives a process argv and returns True for the tool.
+
+    Returns:
+        bool: True when some readable process argv matches. Processes whose argv
+            cannot be read are skipped.
+    """
+    own_pid = psutil.Process().pid
+    for proc in psutil.process_iter(["cmdline"]):
+        cmdline = proc.info["cmdline"]
+        if cmdline and matches(cmdline) and not _spawned_by(proc, pid=own_pid):
+            return True
+    return False
+
+
+def _spawned_by(proc: psutil.Process, *, pid: int) -> bool:
+    """Report whether a process is pid itself or one of its descendants.
+
+    Purger runs tool commands such as `uv cache size` while it measures, and
+    those must not make the tool look busy.
+    """
+    try:
+        return proc.pid == pid or any(parent.pid == pid for parent in proc.parents())
+    except psutil.NoSuchProcess:
+        # The process exited, so it can no longer be using the tool's files.
+        return True
 
 
 def select_plugins(registry: dict[str, Plugin], names: Sequence[str]) -> list[Plugin]:

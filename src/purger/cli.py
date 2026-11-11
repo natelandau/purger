@@ -148,7 +148,7 @@ def _reason_text(reason: SkipReason) -> str:
         case SkipReason.MISSING_BINARY:
             return "its tool is not installed"
         case SkipReason.UNAVAILABLE:
-            return "its tool is not available (for example, not running)"
+            return "its tool is not available or is busy (for example, not running, or running now)"
 
 
 def _emit_json(document: dict[str, Any]) -> None:
