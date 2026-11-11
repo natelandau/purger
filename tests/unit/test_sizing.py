@@ -10,17 +10,20 @@ import pytest
 from nclutils.sh import CompletedCommand, ShellCommandTimeoutError
 from pytest_mock import MockerFixture
 
+from purger import sizing
 from purger.config import Config, PluginSettings
-from purger.plugin import Plugin, Setting, Tier
+from purger.plugin import Detail, PathSizes, Plugin, Setting, Tier
 from purger.sizing import (
     NotConfiguredError,
     PreparedPaths,
     disk_usage,
+    disk_usage_by_path,
     expand_paths,
     measure_action,
     measure_footprint,
     measure_plugin,
     parse_human_size,
+    printed_dir,
     printed_dir_usage,
 )
 from tests.conftest import make_action, make_plugin
@@ -868,3 +871,156 @@ def test_raising_prepare_does_not_abort_measurement(caplog: pytest.LogCaptureFix
     assert footprint == 5
     failures = [r for r in caplog.records if "prepare for p failed" in r.getMessage()]
     assert [r.levelno for r in failures] == [logging.WARNING]
+
+
+def test_disk_usage_by_path_sums_to_disk_usage(tmp_path: Path) -> None:
+    """Verify per-path sizes add up to the combined measurement."""
+    # Given two folders with files
+    first = tmp_path / "a"
+    second = tmp_path / "b"
+    first.mkdir()
+    second.mkdir()
+    (first / "f").write_bytes(b"x" * 10_000)
+    (second / "g").write_bytes(b"x" * 20_000)
+
+    # When measured per path
+    sizes = disk_usage_by_path([first, second])
+
+    # Then every path is a key and the sum matches disk_usage
+    assert set(sizes) == {first, second}
+    assert sum(sizes.values()) == disk_usage([first, second])
+
+
+def test_disk_usage_by_path_counts_shared_hard_link_once(tmp_path: Path) -> None:
+    """Verify a hard link shared by two paths counts toward the first path only."""
+    # Given a file in one folder and a hard link to it in another
+    first = tmp_path / "a"
+    second = tmp_path / "b"
+    first.mkdir()
+    second.mkdir()
+    (first / "f").write_bytes(b"x" * 100_000)
+    (second / "f").hardlink_to(first / "f")
+
+    # When measured per path
+    sizes = disk_usage_by_path([first, second])
+
+    # Then the shared file counts once
+    assert sum(sizes.values()) == disk_usage([first, second])
+    assert sizes[second] < sizes[first]
+
+
+def test_disk_usage_by_path_unreadable_path_is_zero(tmp_path: Path) -> None:
+    """Verify a missing path still appears, with size zero."""
+    # Given / When
+    sizes = disk_usage_by_path([tmp_path / "missing"])
+
+    # Then
+    assert sizes == {tmp_path / "missing": 0}
+
+
+def _files_plugin(tmp_path: Path) -> Plugin:
+    """Build a plugin with one path action over two files in tmp_path."""
+    (tmp_path / "one").write_bytes(b"x" * 10_000)
+    (tmp_path / "two").write_bytes(b"x" * 20_000)
+    return make_plugin(actions=(make_action(command=None, paths=(str(tmp_path / "*"),)),))
+
+
+def test_measure_plugin_without_details_leaves_rows_empty(tmp_path: Path) -> None:
+    """Verify detail rows are only built when asked for."""
+    # Given
+    plugin = _files_plugin(tmp_path)
+
+    # When
+    report = measure_plugin(plugin, include_dangerous=False, settings=Config().settings_for(plugin))
+
+    # Then
+    assert all(action.details == [] for action in report.actions)
+
+
+def test_measure_plugin_with_details_sizes_once_and_rows_sum_to_size(
+    tmp_path: Path, mocker: MockerFixture
+) -> None:
+    """Verify detail rows come from the same walk as the size and add up to it."""
+    # Given
+    plugin = _files_plugin(tmp_path)
+    spy = mocker.spy(sizing, "disk_usage_by_path")
+
+    # When
+    report = measure_plugin(
+        plugin,
+        include_dangerous=False,
+        settings=Config().settings_for(plugin),
+        with_details=True,
+    )
+
+    # Then
+    action = report.actions[0]
+    assert spy.call_count == 1
+    assert len(action.details) == 2
+    assert sum(row.size_bytes or 0 for row in action.details) == action.size_bytes
+
+
+def test_command_action_without_paths_has_no_rows() -> None:
+    """Verify a command-only action has nothing to list."""
+    # Given
+    plugin = make_plugin(actions=(make_action(size=lambda: 5),))
+
+    # When
+    report = measure_plugin(
+        plugin,
+        include_dangerous=False,
+        settings=Config().settings_for(plugin),
+        with_details=True,
+    )
+
+    # Then
+    assert report.actions[0].details == []
+
+
+def test_command_action_hook_that_raises_leaves_no_rows() -> None:
+    """Verify a failing hook on an action without paths leaves it measured with no rows."""
+
+    # Given a command-only action whose hook raises
+    def hook(sizes: PathSizes, settings: PluginSettings) -> list[Detail]:
+        msg = "boom"
+        raise RuntimeError(msg)
+
+    plugin = make_plugin(actions=(make_action(size=lambda: 5, details=hook),))
+
+    # When
+    report = measure_plugin(
+        plugin,
+        include_dangerous=False,
+        settings=Config().settings_for(plugin),
+        with_details=True,
+    )
+
+    # Then
+    assert report.actions[0].size_bytes == 5
+    assert report.actions[0].details == []
+
+
+def test_printed_dir_reads_first_line_and_resolves(tmp_path: Path) -> None:
+    """Verify the printed folder is read past blank lines and through symlinks."""
+    # Given a symlink to a real folder
+    real = tmp_path / "real"
+    real.mkdir()
+    (tmp_path / "link").symlink_to(real)
+
+    # When / Then
+    assert printed_dir(f"\n{tmp_path / 'link'}\n") == real.resolve()
+
+
+@pytest.mark.parametrize("output", ["", "gems\n"])
+def test_printed_dir_rejects_missing_or_relative_output(output: str) -> None:
+    """Verify an empty or relative answer is refused rather than guessed at."""
+    # When / Then
+    with pytest.raises(ValueError, match="absolute"):
+        printed_dir(output)
+
+
+def test_printed_dir_single_line_rejects_several_lines() -> None:
+    """Verify a caller that needs one exact answer can refuse a multi-line one."""
+    # When / Then
+    with pytest.raises(ValueError, match="one absolute"):
+        printed_dir("/a\n/b\n", single_line=True)

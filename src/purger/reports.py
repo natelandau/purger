@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
-from purger.plugin import Action, Plugin
+from purger.plugin import Action, Detail, Plugin
 
 
 class Status(StrEnum):
@@ -38,6 +38,7 @@ class ActionReport:
     resolved_paths: list[Path]
     status: Status | None = None
     error: str | None = None
+    details: list[Detail] = field(default_factory=list)
 
 
 @dataclass

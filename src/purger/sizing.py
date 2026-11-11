@@ -10,6 +10,7 @@ from pathlib import Path
 from nclutils.sh import ShellCommandError, run_command
 
 from purger.config import PluginSettings
+from purger.details import action_details
 from purger.plugin import Action, Plugin, Tier
 from purger.reports import ActionReport, PluginReport, sum_known
 from purger.safety import has_symlinked_parent, invoking_home
@@ -132,22 +133,66 @@ def disk_usage(paths: Iterable[Path]) -> int:
     Returns:
         int: Allocated bytes.
     """
+    return sum(disk_usage_by_path(paths).values())
+
+
+def disk_usage_by_path(paths: Iterable[Path]) -> dict[Path, int]:
+    """Measure each path's allocated disk space in one walk, so per-path sizes add up.
+
+    Each inode counts once across all paths, toward the first path that reaches
+    it, so the sizes sum to `disk_usage` over the same paths.
+
+    Args:
+        paths: Files or directories to measure.
+
+    Returns:
+        dict[Path, int]: Allocated bytes per input path, 0 for one that cannot be read.
+    """
     seen: set[tuple[int, int]] = set()
-    total = 0
-    stack: list[Path] = list(paths)
-    while stack:
-        path = stack.pop()
-        try:
-            info = path.lstat()
-            key = (info.st_dev, info.st_ino)
-            if key not in seen:
-                seen.add(key)
-                total += info.st_blocks * _BLOCK_BYTES
-            if stat.S_ISDIR(info.st_mode):
-                stack.extend(path.iterdir())
-        except OSError as exc:
-            logger.debug("cannot measure %s: %s", path, exc)
-    return total
+    sizes: dict[Path, int] = {}
+    for top in paths:
+        total = 0
+        stack: list[Path] = [top]
+        while stack:
+            path = stack.pop()
+            try:
+                info = path.lstat()
+                key = (info.st_dev, info.st_ino)
+                if key not in seen:
+                    seen.add(key)
+                    total += info.st_blocks * _BLOCK_BYTES
+                if stat.S_ISDIR(info.st_mode):
+                    stack.extend(path.iterdir())
+            except OSError as exc:
+                logger.debug("cannot measure %s: %s", path, exc)
+        sizes[top] = sizes.get(top, 0) + total
+    return sizes
+
+
+def printed_dir(output: str, *, single_line: bool = False) -> Path:
+    """Read the directory a tool prints, such as `npm config get cache`, at its real path.
+
+    Args:
+        output: Tool output whose first non-blank line is an absolute directory.
+        single_line: Refuse output with more than one non-blank line, for a
+            caller that acts on the answer and must not guess.
+
+    Returns:
+        Path: The directory with symlinks resolved, since the tool works on the real one.
+
+    Raises:
+        ValueError: If the output does not name an absolute path, or holds
+            several lines when `single_line` is set.
+    """
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if single_line and len(lines) != 1:
+        msg = f"expected one absolute directory, got {output!r}"
+        raise ValueError(msg)
+    directory = Path(lines[0]) if lines else Path()
+    if not directory.is_absolute():
+        msg = f"expected an absolute directory, got {output!r}"
+        raise ValueError(msg)
+    return directory.resolve()
 
 
 def printed_dir_usage(output: str, patterns: Sequence[str] = ()) -> int:
@@ -162,17 +207,8 @@ def printed_dir_usage(output: str, patterns: Sequence[str] = ()) -> int:
 
     Returns:
         int: Allocated bytes, or 0 when the directory does not exist.
-
-    Raises:
-        ValueError: If the output does not name an absolute path.
     """
-    line = next((line.strip() for line in output.splitlines() if line.strip()), "")
-    directory = Path(line)
-    if not directory.is_absolute():
-        msg = f"expected an absolute directory, got {line!r}"
-        raise ValueError(msg)
-    # The tool cleans the real directory, so measure it even when the printed one is a symlink.
-    directory = directory.resolve()
+    directory = printed_dir(output)
     if not patterns:
         return disk_usage([directory])
     return disk_usage(match for pattern in patterns for match in directory.glob(pattern))
@@ -250,6 +286,7 @@ def measure_action(
     *,
     size_outputs: _SizeOutputs | None = None,
     prepared: Sequence[Path] = (),
+    settings: PluginSettings | None = None,
 ) -> ActionReport:
     """Measure one action, preferring its size hook, then size_cmd, then its paths.
 
@@ -259,9 +296,12 @@ def measure_action(
             so a command that several sizes read runs only once.
         prepared: The literal paths the plugin's `prepare` hook returned for a
             `prepared` action. Ignored for other actions.
+        settings: The plugin's settings for this run. When given, the report
+            also carries detail rows built from each path's size.
 
     Returns:
-        ActionReport: The size in bytes (None when unknown) and the resolved paths.
+        ActionReport: The size in bytes (None when unknown), the resolved paths,
+            and the detail rows when settings were given.
     """
     if action.prepared:
         resolved = _deletable_matches(prepared)
@@ -270,6 +310,8 @@ def measure_action(
         patterns = _path_patterns(action)
         resolved = _deletable_matches(expand_paths(patterns)) if patterns else []
         has_paths = patterns is not None and bool(action.paths)
+    # Per-path sizes come from one walk, which also gives the size of a path action.
+    sizes = disk_usage_by_path(resolved) if settings is not None and resolved else None
     size: int | None = None
     if action.size is not None:
         size = _guarded(label=action.name, size_fn=action.size)
@@ -281,8 +323,11 @@ def measure_action(
             outputs={} if size_outputs is None else size_outputs,
         )
     elif has_paths:
-        size = disk_usage(resolved)
-    return ActionReport(action=action, size_bytes=size, resolved_paths=resolved)
+        size = disk_usage(resolved) if sizes is None else sum(sizes.values())
+    report = ActionReport(action=action, size_bytes=size, resolved_paths=resolved)
+    if settings is not None and (sizes or action.details is not None):
+        report.details = action_details(action=action, sizes=sizes or {}, settings=settings)
+    return report
 
 
 def _path_patterns(action: Action) -> tuple[str, ...] | None:
@@ -401,16 +446,25 @@ def _prepare(plugin: Plugin, settings: PluginSettings) -> PreparedPaths | None:
 
 
 def _measure_actions(
-    actions: Iterable[Action], *, outputs: _SizeOutputs, prepared_paths: PreparedPaths
+    actions: Iterable[Action],
+    *,
+    outputs: _SizeOutputs,
+    prepared_paths: PreparedPaths,
+    settings: PluginSettings | None = None,
 ) -> list[ActionReport]:
     return [
-        measure_action(action, size_outputs=outputs, prepared=prepared_paths.get(action.name, ()))
+        measure_action(
+            action,
+            size_outputs=outputs,
+            prepared=prepared_paths.get(action.name, ()),
+            settings=settings,
+        )
         for action in actions
     ]
 
 
 def measure_plugin(
-    plugin: Plugin, *, include_dangerous: bool, settings: PluginSettings
+    plugin: Plugin, *, include_dangerous: bool, settings: PluginSettings, with_details: bool = False
 ) -> PluginReport:
     """Measure a plugin and its actions.
 
@@ -424,6 +478,8 @@ def measure_plugin(
         plugin: The plugin to measure.
         include_dangerous: Include DANGEROUS actions when true.
         settings: The plugin's settings for this run, handed to `prepare`.
+        with_details: Also build each action's detail rows, which costs a
+            per-path walk for actions sized another way.
 
     Returns:
         PluginReport: The footprint, per-action reports, and the prepared paths.
@@ -440,6 +496,7 @@ def measure_plugin(
         _included_actions(plugin, include_dangerous=include_dangerous),
         outputs=outputs,
         prepared_paths=prepared_paths,
+        settings=settings if with_details else None,
     )
     return PluginReport(
         plugin=plugin,

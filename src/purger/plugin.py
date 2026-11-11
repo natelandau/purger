@@ -1,14 +1,13 @@
 """Data model for purger plugins and their actions."""
 
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from purger.config import PluginSettings
 
 _KEBAB_CASE = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")
@@ -88,6 +87,34 @@ class Setting:
 
 
 @dataclass(frozen=True, kw_only=True)
+class Detail:
+    """One labeled, sized row that breaks an action's size down for a person to inspect.
+
+    Rows merge on `key`, or on `label` when `key` is None, so a plugin can show
+    a short label while keeping rows with the same label apart.
+
+    Raises:
+        ValueError: If the label is blank.
+    """
+
+    label: str
+    size_bytes: int | None
+    items: tuple[str, ...] = ()
+    paths: tuple[Path, ...] = ()
+    key: str | None = None
+
+    def __post_init__(self) -> None:
+        """Validate the row's invariants."""
+        if not self.label.strip():
+            msg = "detail row needs a label"
+            raise ValueError(msg)
+
+
+PathSizes = Mapping[Path, int]
+DetailsHook = Callable[[PathSizes, "PluginSettings"], Sequence[Detail]]
+
+
+@dataclass(frozen=True, kw_only=True)
 class Action:
     """One cleanup operation, run as a command or as a set of paths to delete.
 
@@ -102,6 +129,8 @@ class Action:
     hint about the likely cause; it returns None when it has nothing to add.
     Set `prepared` when the action's paths come from the plugin's `prepare`
     hook, which returns the literal paths for each prepared action by name.
+    Set `details` to describe the action's size as rows, such as one per
+    project, from each resolved path's size and the plugin's settings.
 
     Raises:
         ValueError: If the name is not kebab-case, none of command, paths, or
@@ -121,6 +150,7 @@ class Action:
     outside_footprint: bool = False
     explain_failure: Callable[[str], str | None] | None = None
     prepared: bool = False
+    details: DetailsHook | None = None
 
     def __post_init__(self) -> None:
         """Validate the action's invariants."""
