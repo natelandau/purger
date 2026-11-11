@@ -8,6 +8,7 @@ import pytest
 from rich.console import Console
 
 from purger.cli import app, attach_plugin_catalog
+from purger.config import PluginSettings
 from purger.help_text import plugin_catalog
 from purger.registry import discover_plugins
 from purger.reports import Status
@@ -98,6 +99,34 @@ def test_plugin_catalog_marks_unavailable(monkeypatch: pytest.MonkeyPatch) -> No
     assert "Wipe it" not in text
 
 
+def test_plugin_catalog_does_not_run_the_prepare_hook() -> None:
+    """Verify an unconfigured plugin is not marked unavailable in help and is never prepared."""
+    # Given a plugin whose prepare hook reports it not configured
+    calls: list[str] = []
+
+    def prepare(_: PluginSettings) -> None:
+        calls.append("prepare")
+
+    unconfigured = make_plugin(name="unconfigured", prepare=prepare)
+
+    # When
+    text = plugin_catalog([unconfigured])
+
+    # Then
+    assert "not available on this machine" not in text
+    assert calls == []
+
+
+def test_info_help_does_not_mark_projects_unavailable() -> None:
+    """Verify `purger info --help` lists the projects plugin as available before any config loads."""
+    # Given / When rendering help with the registered plugins
+    text = _help("info")
+
+    # Then
+    line = next(line for line in text.splitlines() if "projects" in line and "leftovers" in line)
+    assert "not available on this machine" not in line
+
+
 @pytest.mark.parametrize("command", [(), ("info",), ("clean",)])
 def test_help_hides_boolean_defaults(command: tuple[str, ...]) -> None:
     """Verify help does not print `[default: False]` next to flags."""
@@ -124,7 +153,7 @@ def test_command_help_lists_json_error_codes(command: tuple[str, ...]) -> None:
     text = _help(*command)
 
     # Then
-    for code in ("usage", "unknown_plugin", "running_as_root", "interrupted"):
+    for code in ("usage", "unknown_plugin", "running_as_root", "interrupted", "config_error"):
         assert f"`{code}`" in text or code in text
 
 

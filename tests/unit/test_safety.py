@@ -11,6 +11,7 @@ from purger.safety import (
     _validated_location,
     delete_path,
     invoking_home,
+    resolve_home_folder,
 )
 
 
@@ -334,3 +335,92 @@ def test_invoking_home_falls_back_to_current_user(mocker: MockerFixture) -> None
 
     # When / Then
     assert invoking_home() == Path.home()
+
+
+def test_resolve_home_folder_returns_the_resolved_folder(home: Path, tmp_path: Path) -> None:
+    """Verify a folder inside home resolves, including one reached through a symlinked home."""
+    # Given
+    (home / "repos").mkdir()
+    linked_home = tmp_path / "linked-home"
+    linked_home.symlink_to(home)
+
+    # When
+    resolved = resolve_home_folder(linked_home / "repos", home_resolved=home.resolve())
+
+    # Then
+    assert resolved == (home / "repos").resolve()
+
+
+@pytest.mark.parametrize(
+    ("kind", "reason"),
+    [
+        ("relative", "not an absolute path"),
+        ("home", "not inside your home folder"),
+        ("outside", "not inside your home folder"),
+        ("dotdot", "not inside your home folder"),
+        ("missing", "not an existing folder"),
+        ("file", "not an existing folder"),
+    ],
+)
+def test_resolve_home_folder_explains_a_rejection(
+    home: Path, precious: Path, kind: str, reason: str
+) -> None:
+    """Verify each unusable folder is rejected with a reason naming the problem."""
+    # Given
+    (home / "repos").mkdir()
+    (home / "notes.txt").write_text("x")
+    path = {
+        "relative": Path("repos"),
+        "home": home,
+        "outside": precious,
+        "dotdot": home / "repos" / "..",
+        "missing": home / "nowhere",
+        "file": home / "notes.txt",
+    }[kind]
+
+    # When
+    result = resolve_home_folder(path, home_resolved=home.resolve())
+
+    # Then
+    assert isinstance(result, str)
+    assert reason in result
+
+
+def test_resolve_home_folder_rejects_another_device(home: Path, mocker: MockerFixture) -> None:
+    """Verify a folder on another device than home is rejected."""
+    # Given
+    (home / "repos").mkdir()
+    home_resolved = home.resolve()
+    mocker.patch(
+        "purger.safety._device",
+        autospec=True,
+        side_effect=lambda path: 1 if path == home_resolved else 2,
+    )
+
+    # When
+    result = resolve_home_folder(home / "repos", home_resolved=home_resolved)
+
+    # Then
+    assert result == "it is on a different device than your home folder"
+
+
+def test_resolve_home_folder_reports_an_unreadable_device(
+    home: Path, mocker: MockerFixture
+) -> None:
+    """Verify a folder whose device cannot be checked is rejected with the OS error."""
+    # Given
+    (home / "repos").mkdir()
+    real_lstat = Path.lstat
+
+    def denied(self: Path) -> object:
+        if self.name == "repos":
+            raise PermissionError(13, "Permission denied")
+        return real_lstat(self)
+
+    mocker.patch.object(Path, "lstat", denied)
+
+    # When
+    result = resolve_home_folder(home / "repos", home_resolved=home.resolve())
+
+    # Then
+    assert result == "it cannot be read (Permission denied)"

@@ -30,6 +30,7 @@ purger runs on macOS and Linux. Each supported tool is a plugin, and each plugin
 - `podman` (macOS, Linux): unused images, stopped containers, pods, networks, and build cache, and unused volumes with `--dangerous`.
 - `pre-commit` (macOS, Linux): unused hook repos, or the entire cache with `--dangerous`.
 - `prek` (macOS, Linux): unused hook environments, or the entire cache with `--dangerous`.
+- `projects` (macOS, Linux): tool caches, installed dependencies, and build output inside the project folders you list in the config. It does nothing until you set `paths`. See [Configuration](#configuration).
 - `rip2` (macOS, Linux): the rip2 graveyard of deleted files. Runs only when `rip` on PATH is rip2.
 - `simulators` (macOS): simulator devices the installed Xcode cannot run.
 - `swiftpm` (macOS, Linux): cached package clones, manifests, and binary frameworks.
@@ -98,6 +99,66 @@ These options apply to `purger clean` only:
 | `--dry-run`   | List the commands and paths that would run. purger asks nothing and changes nothing. |
 | `--yes`, `-y` | Skip the single prompt for `safe` actions.                                           |
 
+## Configuration
+
+purger works without a config file. Create one to turn off plugins or to change plugin settings.
+
+purger looks for the file in this order:
+
+1. The path in the `PURGER_CONFIG` environment variable. The file must exist.
+2. `$XDG_CONFIG_HOME/purger/config.toml`.
+3. `~/.config/purger/config.toml`.
+
+If no file exists, purger uses its defaults.
+
+```toml
+# Plugins that `purger info` and `purger clean` leave out when you name no plugin.
+skip = ["docker", "xcode"]
+
+# Settings for one plugin. This table is an example: `example` and `roots` are
+# placeholders, not a real plugin or setting.
+[plugins.example]
+roots = ["~/code", "~/work"]
+```
+
+The `skip` setting applies only when you name no plugins. If you name a plugin on the command line, purger measures it even when `skip` lists it. A skipped plugin appears in the `skipped` list with the reason `disabled`.
+
+An environment variable replaces the same setting in the file. Set `PURGER_SKIP` for the general `skip` setting. For a plugin setting, join the plugin name and the setting name with two underscores, in upper case. A hyphen in the plugin name becomes an underscore. Write a list as comma-separated values.
+
+```bash
+PURGER_SKIP=docker,xcode purger info
+PURGER_EXAMPLE__ROOTS=~/code,~/work purger info example
+```
+
+purger prints a warning on stderr for an unknown key or plugin name. It exits with code `2` for an invalid value or a file that is not valid TOML. With `--json`, the error document has the code `config_error`.
+
+The config never changes what needs confirmation. You cannot set `--yes`, `--dangerous`, or a tier in the file.
+
+### Clean project folders
+
+The `projects` plugin looks for leftovers inside your project folders, such as `.mypy_cache`, `node_modules`, and `.venv`. It scans only the folders in `paths`. Each one must be an absolute path (or start with `~/`) to an existing folder inside your home folder, on the same device as your home folder. purger ignores these paths and prints a warning: a relative path, a path outside your home folder, your home folder itself, a folder that does not exist, and a path on another device.
+
+```toml
+[plugins.projects]
+# Folders that hold your projects. Env var: PURGER_PROJECTS__PATHS
+paths = ["~/repos"]
+# Folder levels to search below each path. Env var: PURGER_PROJECTS__MAX_DEPTH
+max_depth = 6
+# Leave a project alone when a file in it changed within this many days.
+# 0 turns the check off. Env var: PURGER_PROJECTS__RECENT_DAYS
+recent_days = 7
+# Folder names, patterns, or absolute paths that purger never removes or
+# searches for leftovers. A recent change inside one still keeps its project.
+# A path must start with / or ~/.
+# Env var: PURGER_PROJECTS__EXCLUDE
+exclude = ["~/repos/keep", "vendor"]
+# Extra folder names or patterns to offer for removal. No slashes.
+# Env var: PURGER_PROJECTS__INCLUDE
+include = ["scratch"]
+```
+
+purger always leaves alone folders that hold git-tracked files. It also leaves alone a project with recent file changes, for every action, including the `safe` caches. It removes `build`, `dist`, and `target` only when git tracks the project file next to them, such as `package.json` or `Cargo.toml`. The `caches` action is `safe`. The `dependencies`, `builds`, and `custom` actions are `caution`.
+
 ## Risk tiers
 
 Each cleanup action has one tier. The tier controls how purger asks for confirmation.
@@ -123,6 +184,8 @@ purger clean --json --yes
 
 `purger clean --json` never prompts. With `--yes`, it runs the `safe` actions only. It reports each `caution` and `dangerous` action as `declined`. Without a terminal, purger applies the same rules.
 
+Each entry in `skipped` has a `reason`: `platform`, `missing_binary`, `unavailable`, `disabled`, or `not_configured`. The `disabled` reason means the `skip` setting in the config file turned the plugin off. The `not_configured` reason means the plugin needs a setting, such as search paths, that the config file does not provide.
+
 The help pages give the full document shape and the status values:
 
 ```bash
@@ -138,7 +201,7 @@ Both commands use these exit codes:
 | ----- | ----------------------------------------------------------------------- |
 | `0`   | Success. This includes a run where you declined every action.           |
 | `1`   | An action that you approved failed. Only `purger clean` uses this code. |
-| `2`   | A usage error, such as an unknown plugin name or a run as root.         |
+| `2`   | A usage error, such as an unknown plugin name, an invalid config file or `PURGER_*` variable, or a run as root. |
 | `130` | You pressed Ctrl-C.                                                     |
 
 ## Contributing

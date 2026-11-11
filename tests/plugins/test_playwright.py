@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from purger.config import Config
 from purger.plugins import playwright
 from purger.sizing import measure_plugin
 
@@ -86,7 +87,11 @@ def test_playwright_finds_old_builds_when_measured(
     assert playwright.PLUGIN.is_available is not None
 
     # When
-    report = measure_plugin(playwright.PLUGIN, include_dangerous=False)
+    report = measure_plugin(
+        playwright.PLUGIN,
+        include_dangerous=False,
+        settings=Config().settings_for(playwright.PLUGIN),
+    )
 
     # Then
     assert playwright.PLUGIN.is_available()

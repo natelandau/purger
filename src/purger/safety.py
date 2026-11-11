@@ -41,6 +41,52 @@ def _device(path: Path) -> int | None:
         raise UnsafePathError(msg) from exc
 
 
+def _off_home_device(location: Path, home_resolved: Path) -> bool:
+    """Report whether an existing location lives on another device than home.
+
+    Raises:
+        UnsafePathError: If either device cannot be checked.
+    """
+    device = _device(location)
+    return device is not None and device != _device(home_resolved)
+
+
+def resolve_home_folder(path: Path, *, home_resolved: Path) -> Path | str:
+    """Resolve a folder that must sit strictly inside home, on home's device.
+
+    Use this to vet a folder before searching it for deletion targets, so the search
+    applies the same home and device policy that `delete_path` enforces.
+
+    Args:
+        path: The folder as configured, after expanding `~`.
+        home_resolved: The invoking user's home with symlinks resolved.
+
+    Returns:
+        Path | str: The resolved folder, or the reason it cannot be used.
+    """
+    if not path.is_absolute():
+        return "it is not an absolute path"
+    try:
+        resolved = path.resolve()
+        if not resolved.is_relative_to(home_resolved) or resolved == home_resolved:
+            return "it is not inside your home folder"
+        if not resolved.is_dir():
+            return "it is not an existing folder"
+        if _off_home_device(location=resolved, home_resolved=home_resolved):
+            return "it is on a different device than your home folder"
+    except (OSError, UnsafePathError) as exc:
+        return f"it cannot be read ({_read_error(exc)})"
+    return resolved
+
+
+def _read_error(exc: OSError | UnsafePathError) -> str:
+    """Describe the OS error behind a failed read, without the deletion wording."""
+    error = exc.__cause__ if isinstance(exc, UnsafePathError) else exc
+    if isinstance(error, OSError) and error.strerror:
+        return error.strerror
+    return str(error or exc)
+
+
 def _symlinked_parent(path: Path, root: Path) -> Path | None:
     """Return the first symlinked directory between path and root, or None."""
     for parent in path.parents:
@@ -143,8 +189,7 @@ def _validated_location(path: Path, home: Path) -> Path:
         msg = f"Refusing to delete {path}: it is a direct child of the home directory"
         raise UnsafePathError(msg)
 
-    location_device = _device(location)
-    if location_device is not None and location_device != _device(home_resolved):
+    if _off_home_device(location=location, home_resolved=home_resolved):
         msg = f"Refusing to delete {path}: it is on a different device than the home directory"
         raise UnsafePathError(msg)
     return location

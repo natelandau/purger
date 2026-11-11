@@ -2,14 +2,19 @@
 
 import logging
 import os
+from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 import pytest
 from nclutils.sh import CompletedCommand, ShellCommandTimeoutError
 from pytest_mock import MockerFixture
 
-from purger.plugin import Tier
+from purger.config import Config, PluginSettings
+from purger.plugin import Plugin, Setting, Tier
 from purger.sizing import (
+    NotConfiguredError,
+    PreparedPaths,
     disk_usage,
     expand_paths,
     measure_action,
@@ -245,7 +250,9 @@ def test_measure_plugin_footprint() -> None:
 
     # When
     footprints = [
-        measure_plugin(plugin, include_dangerous=False).footprint_bytes
+        measure_plugin(
+            plugin, include_dangerous=False, settings=Config().settings_for(plugin)
+        ).footprint_bytes
         for plugin in (own, summed, unknown)
     ]
 
@@ -261,8 +268,8 @@ def test_measure_plugin_filters_dangerous() -> None:
     )
 
     # When measured both ways / Then the filter applies
-    off = measure_plugin(plugin, include_dangerous=False)
-    on = measure_plugin(plugin, include_dangerous=True)
+    off = measure_plugin(plugin, include_dangerous=False, settings=Config().settings_for(plugin))
+    on = measure_plugin(plugin, include_dangerous=True, settings=Config().settings_for(plugin))
     assert [r.action.name for r in off.actions] == ["a"]
     assert [r.action.name for r in on.actions] == ["a", "d"]
 
@@ -311,7 +318,7 @@ def test_measure_plugin_paths_footprint(tmp_path: Path) -> None:
     plugin = make_plugin(paths=(str(tmp_path / "f"),))
 
     # When measured / Then footprint is the disk usage
-    report = measure_plugin(plugin, include_dangerous=False)
+    report = measure_plugin(plugin, include_dangerous=False, settings=Config().settings_for(plugin))
     assert report.footprint_bytes == disk_usage([tmp_path / "f"])
 
 
@@ -321,7 +328,12 @@ def test_measure_plugin_failing_size_cmd_is_unknown() -> None:
     plugin = make_plugin(size_cmd=("false",), actions=(make_action(size=lambda: 5),))
 
     # When measured / Then footprint is None
-    assert measure_plugin(plugin, include_dangerous=False).footprint_bytes is None
+    assert (
+        measure_plugin(
+            plugin, include_dangerous=False, settings=Config().settings_for(plugin)
+        ).footprint_bytes
+        is None
+    )
 
 
 def test_measure_plugin_adds_actions_outside_own_footprint() -> None:
@@ -336,8 +348,12 @@ def test_measure_plugin_adds_actions_outside_own_footprint() -> None:
     )
 
     # When measured with and without dangerous actions
-    with_volumes = measure_plugin(plugin, include_dangerous=True)
-    without_volumes = measure_plugin(plugin, include_dangerous=False)
+    with_volumes = measure_plugin(
+        plugin, include_dangerous=True, settings=Config().settings_for(plugin)
+    )
+    without_volumes = measure_plugin(
+        plugin, include_dangerous=False, settings=Config().settings_for(plugin)
+    )
 
     # Then the outside action adds to the footprint only when it is included
     assert with_volumes.footprint_bytes == 107
@@ -353,7 +369,12 @@ def test_measure_plugin_unknown_own_footprint_stays_unknown() -> None:
     )
 
     # When / Then
-    assert measure_plugin(plugin, include_dangerous=True).footprint_bytes is None
+    assert (
+        measure_plugin(
+            plugin, include_dangerous=True, settings=Config().settings_for(plugin)
+        ).footprint_bytes
+        is None
+    )
 
 
 def test_expand_paths_home_with_glob_characters(tmp_path: Path, mocker: MockerFixture) -> None:
@@ -502,7 +523,7 @@ def test_measure_plugin_runs_a_shared_size_cmd_once(mocker: MockerFixture) -> No
     )
 
     # When
-    report = measure_plugin(plugin, include_dangerous=True)
+    report = measure_plugin(plugin, include_dangerous=True, settings=Config().settings_for(plugin))
 
     # Then the command ran once and each parser read its output
     assert run_command.call_count == 1
@@ -523,12 +544,17 @@ def test_measure_footprint_skips_actions_covered_by_own_footprint(mocker: Mocker
     )
 
     # When
-    footprint = measure_footprint(plugin, include_dangerous=True)
+    footprint = measure_footprint(plugin, include_dangerous=True, prepared_paths={})
 
     # Then the covered action is not measured and the footprint matches measure_plugin
     covered.assert_not_called()
     assert footprint == 107
-    assert footprint == measure_plugin(plugin, include_dangerous=True).footprint_bytes
+    assert (
+        footprint
+        == measure_plugin(
+            plugin, include_dangerous=True, settings=Config().settings_for(plugin)
+        ).footprint_bytes
+    )
 
 
 @pytest.mark.parametrize("include_dangerous", [True, False])
@@ -543,11 +569,16 @@ def test_measure_footprint_sums_actions_without_own_footprint(*, include_dangero
     )
 
     # When
-    footprint = measure_footprint(plugin, include_dangerous=include_dangerous)
+    footprint = measure_footprint(plugin, include_dangerous=include_dangerous, prepared_paths={})
 
     # Then
     assert footprint == (7 if include_dangerous else 3)
-    assert footprint == measure_plugin(plugin, include_dangerous=include_dangerous).footprint_bytes
+    assert (
+        footprint
+        == measure_plugin(
+            plugin, include_dangerous=include_dangerous, settings=Config().settings_for(plugin)
+        ).footprint_bytes
+    )
 
 
 def test_measure_action_absolute_paths_without_home(tmp_path: Path, mocker: MockerFixture) -> None:
@@ -571,7 +602,12 @@ def test_measure_plugin_size_hook_footprint() -> None:
     plugin = make_plugin(size=lambda: 42, size_cmd=("echo", "100"))
 
     # When / Then the hook wins
-    assert measure_plugin(plugin, include_dangerous=False).footprint_bytes == 42
+    assert (
+        measure_plugin(
+            plugin, include_dangerous=False, settings=Config().settings_for(plugin)
+        ).footprint_bytes
+        == 42
+    )
 
 
 def test_measure_plugin_raising_size_hook_is_unknown() -> None:
@@ -585,7 +621,12 @@ def test_measure_plugin_raising_size_hook_is_unknown() -> None:
     plugin = make_plugin(size=boom, actions=(make_action(size=lambda: 5),))
 
     # When / Then
-    assert measure_plugin(plugin, include_dangerous=False).footprint_bytes is None
+    assert (
+        measure_plugin(
+            plugin, include_dangerous=False, settings=Config().settings_for(plugin)
+        ).footprint_bytes
+        is None
+    )
 
 
 def test_printed_dir_usage_measures_whole_directory(tmp_path: Path) -> None:
@@ -627,3 +668,203 @@ def test_printed_dir_usage_rejects_non_absolute_output(output: str) -> None:
     # Given / When / Then
     with pytest.raises(ValueError, match="absolute directory"):
         printed_dir_usage(output)
+
+
+def _prepared_plugin(prepare: Callable[[PluginSettings], PreparedPaths | None]) -> Plugin:
+    """Build a plugin with one setting and one prepared action named `found`."""
+    return make_plugin(
+        settings=(Setting(name="depth", kind="int", default=3, help="How deep to look."),),
+        prepare=prepare,
+        actions=(make_action(name="found", command=None, prepared=True),),
+    )
+
+
+def test_measure_plugin_hands_prepare_its_settings_once(tmp_path: Path) -> None:
+    """Verify prepare runs once with the run's settings and its paths are measured literally."""
+    # Given a prepared path whose name holds glob characters
+    target = tmp_path / "a[1]"
+    target.mkdir()
+    (target / "data").write_bytes(b"x" * 10_000)
+    seen: list[PluginSettings] = []
+
+    def prepare(settings: PluginSettings) -> PreparedPaths:
+        seen.append(settings)
+        return {"found": (target,)}
+
+    plugin = _prepared_plugin(prepare)
+    settings = Config(values={"p": {"depth": 9}}).settings_for(plugin)
+
+    # When
+    report = measure_plugin(plugin, include_dangerous=False, settings=settings)
+
+    # Then
+    assert seen == [settings]
+    assert seen[0].integer("depth") == 9
+    assert report.prepared_paths == {"found": (target,)}
+    assert report.actions[0].resolved_paths == [target]
+    assert report.actions[0].size_bytes == disk_usage([target])
+    assert report.footprint_bytes == disk_usage([target])
+
+
+def test_prepared_paths_through_a_symlinked_parent_are_dropped(
+    tmp_path: Path, mocker: MockerFixture
+) -> None:
+    """Verify prepared paths pass the same symlinked-parent filter as path actions."""
+    # Given
+    mocker.patch("purger.sizing.invoking_home", return_value=tmp_path)
+    (tmp_path / "real" / "cache").mkdir(parents=True)
+    (tmp_path / "link").symlink_to(tmp_path / "real")
+    kept = tmp_path / "real" / "cache"
+    through_link = tmp_path / "link" / "cache"
+    plugin = _prepared_plugin(lambda _: {"found": (kept, through_link)})
+
+    # When
+    report = measure_plugin(plugin, include_dangerous=False, settings=Config().settings_for(plugin))
+
+    # Then
+    assert report.actions[0].resolved_paths == [kept]
+
+
+def test_prepared_action_missing_from_the_result_measures_nothing() -> None:
+    """Verify a prepared action the hook returned nothing for has no paths and size zero."""
+    # Given
+    plugin = _prepared_plugin(lambda _: {})
+
+    # When
+    report = measure_plugin(plugin, include_dangerous=False, settings=Config().settings_for(plugin))
+
+    # Then
+    assert report.actions[0].resolved_paths == []
+    assert report.actions[0].size_bytes == 0
+
+
+def test_measure_plugin_raises_when_prepare_reports_not_configured() -> None:
+    """Verify a prepare hook that returns None marks the plugin as not configured."""
+    # Given
+    plugin = _prepared_plugin(lambda _: None)
+
+    # When / Then
+    with pytest.raises(NotConfiguredError):
+        measure_plugin(plugin, include_dangerous=False, settings=Config().settings_for(plugin))
+
+
+def test_measure_footprint_remeasures_given_paths_without_preparing(tmp_path: Path) -> None:
+    """Verify measure_footprint never calls prepare and re-measures the paths it is given."""
+    # Given
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    for path in (first, second):
+        path.mkdir()
+        (path / "data").write_bytes(b"x" * 10_000)
+    calls: list[str] = []
+
+    def prepare(_: PluginSettings) -> PreparedPaths:
+        calls.append("prepare")
+        return {"found": (first, second)}
+
+    plugin = _prepared_plugin(prepare)
+    report = measure_plugin(plugin, include_dangerous=False, settings=Config().settings_for(plugin))
+    before = report.footprint_bytes
+    assert before is not None
+
+    # When
+    (second / "data").unlink()
+    second.rmdir()
+    after = measure_footprint(plugin, include_dangerous=False, prepared_paths=report.prepared_paths)
+
+    # Then
+    assert calls == ["prepare"]
+    assert after == disk_usage([first])
+    assert after < before
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        pytest.param({"found": "ab"}, id="string-value"),
+        pytest.param({"found": (1,)}, id="non-path-item"),
+        pytest.param({"found": ("relative/cache",)}, id="relative-path"),
+        pytest.param({"found": 5}, id="non-iterable-value"),
+        pytest.param({1: ()}, id="non-string-key"),
+        pytest.param([("found", ())], id="not-a-mapping"),
+    ],
+)
+def test_malformed_prepare_result_is_logged_and_ignored(
+    result: object, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Verify a malformed prepare result is logged like a failure and leaves no prepared paths."""
+    # Given
+    plugin = _prepared_plugin(lambda _: cast("PreparedPaths", result))
+    caplog.set_level(logging.WARNING, logger="purger.sizing")
+
+    # When
+    report = measure_plugin(plugin, include_dangerous=False, settings=Config().settings_for(plugin))
+
+    # Then
+    assert report.prepared_paths == {}
+    assert report.actions[0].resolved_paths == []
+    assert any("prepare for p failed" in r.getMessage() for r in caplog.records)
+
+
+def test_prepare_result_paths_are_coerced_to_path_tuples(tmp_path: Path) -> None:
+    """Verify a hook may return any iterable of strings or paths for an action."""
+    # Given
+    target = tmp_path / "cache"
+    target.mkdir()
+    plugin = _prepared_plugin(lambda _: cast("PreparedPaths", {"found": [str(target)]}))
+
+    # When
+    report = measure_plugin(plugin, include_dangerous=False, settings=Config().settings_for(plugin))
+
+    # Then
+    assert report.prepared_paths == {"found": (target,)}
+    assert report.actions[0].resolved_paths == [target]
+
+
+def test_prepare_result_naming_no_prepared_action_is_logged(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Verify paths returned for a name that is not a prepared action are logged and dropped."""
+    # Given
+    plugin = _prepared_plugin(lambda _: {"found": (tmp_path,), "a": (tmp_path,)})
+    caplog.set_level(logging.WARNING, logger="purger.sizing")
+
+    # When
+    report = measure_plugin(plugin, include_dangerous=False, settings=Config().settings_for(plugin))
+
+    # Then
+    assert report.prepared_paths == {"found": (tmp_path,)}
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("'a'" in message and "not a prepared action" in message for message in warnings)
+
+
+def test_raising_prepare_does_not_abort_measurement(caplog: pytest.LogCaptureFixture) -> None:
+    """Verify a prepare hook that raises is logged and the plugin shows with no prepared paths."""
+
+    # Given
+    def boom(_: PluginSettings) -> PreparedPaths:
+        msg = "boom"
+        raise RuntimeError(msg)
+
+    plugin = make_plugin(
+        prepare=boom,
+        actions=(
+            make_action(size=lambda: 5),
+            make_action(name="found", command=None, prepared=True),
+        ),
+    )
+    caplog.set_level(logging.WARNING, logger="purger.sizing")
+
+    # When
+    report = measure_plugin(plugin, include_dangerous=False, settings=Config().settings_for(plugin))
+    footprint = measure_footprint(
+        plugin, include_dangerous=False, prepared_paths=report.prepared_paths
+    )
+
+    # Then
+    assert report.prepared_paths == {}
+    assert report.actions[1].resolved_paths == []
+    assert report.footprint_bytes == 5
+    assert footprint == 5
+    failures = [r for r in caplog.records if "prepare for p failed" in r.getMessage()]
+    assert [r.levelno for r in failures] == [logging.WARNING]

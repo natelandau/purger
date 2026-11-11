@@ -1,7 +1,7 @@
 """Report types describing what purger measured and did."""
 
-from collections.abc import Iterable
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
@@ -25,6 +25,8 @@ class SkipReason(StrEnum):
     PLATFORM = "platform"
     MISSING_BINARY = "missing_binary"
     UNAVAILABLE = "unavailable"
+    DISABLED = "disabled"
+    NOT_CONFIGURED = "not_configured"
 
 
 @dataclass
@@ -40,13 +42,18 @@ class ActionReport:
 
 @dataclass
 class PluginReport:
-    """Measured footprint of one plugin and the reports of its actions."""
+    """Measured footprint of one plugin and the reports of its actions.
+
+    `prepared_paths` holds what the plugin's `prepare` hook returned for this
+    run, so re-measuring after a cleanup compares the same paths.
+    """
 
     plugin: Plugin
     footprint_bytes: int | None
     actions: list[ActionReport]
     freed_bytes: int | None = None
     after_bytes: int | None = None
+    prepared_paths: Mapping[str, tuple[Path, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

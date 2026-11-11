@@ -18,6 +18,7 @@ from nclutils.ask import choose_one_from_list
 from purger import __version__
 from purger.clean_flow import CleanOptions, plan_clean
 from purger.concurrency import map_as_completed
+from purger.config import FALSY_VALUES, Config, ConfigError, load_config
 from purger.execution import execute, mark_unfinished, record_freed
 from purger.help_text import (
     APP_HELP,
@@ -51,7 +52,7 @@ from purger.reports import (
     Status,
 )
 from purger.runner import sudo_ready
-from purger.sizing import measure_plugin
+from purger.sizing import NotConfiguredError, measure_plugin
 
 
 class ExitCode(IntEnum):
@@ -155,6 +156,10 @@ def _reason_text(reason: SkipReason) -> str:
             return "its tool is not installed"
         case SkipReason.UNAVAILABLE:
             return "its tool is not available or is busy (for example, not running, or running now)"
+        case SkipReason.DISABLED:
+            return "turned off by the skip setting in the config file"
+        case SkipReason.NOT_CONFIGURED:
+            return "it needs settings in the config file, such as search paths"
 
 
 def _emit_json(document: dict[str, Any]) -> None:
@@ -171,12 +176,17 @@ def _error(code: str, message: str, *, exit_code: ExitCode, json_output: bool) -
 
 
 def _measure_one(
-    plugin: Plugin, *, dangerous: bool, processes: ProcessTable
+    plugin: Plugin, *, dangerous: bool, processes: ProcessTable, config: Config
 ) -> PluginReport | SkippedPlugin:
     reason = skip_reason(plugin, processes=processes)
     if reason is not None:
         return SkippedPlugin(name=plugin.name, reason=reason)
-    return measure_plugin(plugin, include_dangerous=dangerous)
+    try:
+        return measure_plugin(
+            plugin, include_dangerous=dangerous, settings=config.settings_for(plugin)
+        )
+    except NotConfiguredError:
+        return SkippedPlugin(name=plugin.name, reason=SkipReason.NOT_CONFIGURED)
 
 
 def _measure(
@@ -184,6 +194,7 @@ def _measure(
     *,
     dangerous: bool,
     display: MeasureDisplay | None,
+    config: Config,
 ) -> _Scan:
     """Check and measure plugins concurrently, keeping results in plugin order.
 
@@ -192,7 +203,8 @@ def _measure(
     """
     results: dict[int, PluginReport | SkippedPlugin] = {}
     for index, result in map_as_completed(
-        partial(_measure_one, dangerous=dangerous, processes=ProcessTable()), items=plugins
+        partial(_measure_one, dangerous=dangerous, processes=ProcessTable(), config=config),
+        items=plugins,
     ):
         results[index] = result
         if display is not None:
@@ -206,17 +218,22 @@ def _measure(
     return scan
 
 
-def _scan(names: Sequence[str], *, dangerous: bool, json_output: bool) -> _Scan:
+def _scan(names: Sequence[str], *, dangerous: bool, json_output: bool, config: Config) -> _Scan:
     """Select and measure plugins, with a live row per plugin unless output is JSON.
 
     Raises:
         UnknownPluginError: If a requested plugin name is not registered.
     """
-    selected = select_plugins(registry=discover_plugins(), names=names)
+    selection = select_plugins(
+        registry=discover_plugins(), names=names, skip=frozenset(config.skip)
+    )
     if json_output:
-        return _measure(selected, dangerous=dangerous, display=None)
-    with MeasureDisplay([plugin.name for plugin in selected]) as display:
-        return _measure(selected, dangerous=dangerous, display=display)
+        scan = _measure(selection.plugins, dangerous=dangerous, display=None, config=config)
+    else:
+        with MeasureDisplay([plugin.name for plugin in selection.plugins]) as display:
+            scan = _measure(selection.plugins, dangerous=dangerous, display=display, config=config)
+    scan.skipped.extend(selection.disabled)
+    return scan
 
 
 def _begin(
@@ -229,7 +246,18 @@ def _begin(
     """
     pp.configure(verbosity=verbose, quiet=json_output)
     try:
-        return _scan(names, dangerous=dangerous, json_output=json_output)
+        config = load_config(discover_plugins())
+    except ConfigError as exc:
+        return _error(
+            code="config_error",
+            message=str(exc),
+            exit_code=ExitCode.USAGE,
+            json_output=json_output,
+        )
+    for warning in config.warnings:
+        pp.warning(warning)
+    try:
+        return _scan(names, dangerous=dangerous, json_output=json_output, config=config)
     except UnknownPluginError as exc:
         return _error(
             code="unknown_plugin",
@@ -472,15 +500,12 @@ def clean(
     )
 
 
-_FALSY_FLAG_VALUES = frozenset({"", "0", "false", "f", "no", "n", "off"})
-
-
 def _wants_json(tokens: Sequence[str]) -> bool:
     """Report whether the command line asks for JSON output, as `--json` or `--json=<truthy>`."""
     for arg in tokens:
         if arg == "--json":
             return True
-        if arg.startswith("--json=") and arg.partition("=")[2].lower() not in _FALSY_FLAG_VALUES:
+        if arg.startswith("--json=") and arg.partition("=")[2].lower() not in FALSY_VALUES:
             return True
     return False
 

@@ -6,6 +6,7 @@ from pathlib import Path
 
 from pytest_mock import MockerFixture
 
+from purger.config import Config
 from purger.output import is_partial
 from purger.plugins import apt
 from purger.sizing import disk_usage, measure_plugin
@@ -30,7 +31,7 @@ def test_apt_footprint_matches_clean(tmp_path: Path, mocker: MockerFixture) -> N
     )
 
     # When
-    report = measure_plugin(plugin, include_dangerous=False)
+    report = measure_plugin(plugin, include_dangerous=False, settings=Config().settings_for(plugin))
 
     # Then
     assert report.footprint_bytes == disk_usage([archives / "pkg.deb"])

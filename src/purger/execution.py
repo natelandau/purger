@@ -3,7 +3,6 @@
 from collections.abc import Iterable
 from contextlib import nullcontext
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path
 
 from nclutils import pp
@@ -105,9 +104,14 @@ def execute(
 
 
 def _set_freed(ran: list[PluginReport], *, dangerous: bool) -> None:
-    plugins = [plugin_report.plugin for plugin_report in ran]
-    measure = partial(measure_footprint, include_dangerous=dangerous)
-    for index, after in map_as_completed(measure, items=plugins):
+    def measure(plugin_report: PluginReport) -> int | None:
+        return measure_footprint(
+            plugin_report.plugin,
+            include_dangerous=dangerous,
+            prepared_paths=plugin_report.prepared_paths,
+        )
+
+    for index, after in map_as_completed(measure, items=ran):
         plugin_report = ran[index]
         before = plugin_report.footprint_bytes
         plugin_report.after_bytes = after

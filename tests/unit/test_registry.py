@@ -12,6 +12,7 @@ import psutil
 import pytest
 from pytest_mock import MockerFixture
 
+from purger.config import PluginSettings
 from purger.registry import (
     DuplicatePluginError,
     ProcessTable,
@@ -21,7 +22,7 @@ from purger.registry import (
     select_plugins,
     skip_reason,
 )
-from purger.reports import SkipReason
+from purger.reports import SkippedPlugin, SkipReason
 from tests.conftest import make_plugin
 
 _OWN_PID = 4242
@@ -181,6 +182,36 @@ def test_skip_reason_is_available_raises() -> None:
     assert reason is SkipReason.UNAVAILABLE
 
 
+def test_skip_reason_never_runs_prepare() -> None:
+    """Verify skip checks leave the prepare hook to measurement, which decides NOT_CONFIGURED."""
+    # Given a plugin whose prepare hook reports it not configured
+    calls: list[str] = []
+
+    def prepare(_: PluginSettings) -> None:
+        calls.append("prepare")
+
+    plugin = make_plugin(prepare=prepare)
+
+    # When
+    reason = skip_reason(plugin)
+
+    # Then
+    assert reason is None
+    assert calls == []
+
+
+def test_skip_reason_unavailable_precedes_prepare() -> None:
+    """Verify an unavailable plugin is skipped as UNAVAILABLE even when prepare would say no."""
+    # Given a plugin that is both unavailable and unconfigured
+    plugin = make_plugin(prepare=lambda _: None, is_available=lambda: False)
+
+    # When
+    reason = skip_reason(plugin)
+
+    # Then
+    assert reason is SkipReason.UNAVAILABLE
+
+
 def test_skip_reason_applicable(monkeypatch: pytest.MonkeyPatch, mocker: MockerFixture) -> None:
     """Verify an applicable plugin has no skip reason."""
     # Given a linux host where the required binary exists and the hook says yes
@@ -208,10 +239,54 @@ def test_select_plugins() -> None:
         select_plugins(registry, ["nope"])
 
     # Then
-    assert [p.name for p in everything] == ["a", "b"]
-    assert [p.name for p in reordered] == ["b", "a"]
-    assert [p.name for p in repeated] == ["a"]
+    assert [p.name for p in everything.plugins] == ["a", "b"]
+    assert [p.name for p in reordered.plugins] == ["b", "a"]
+    assert [p.name for p in repeated.plugins] == ["a"]
+    assert everything.disabled == reordered.disabled == repeated.disabled == []
     assert str(exc_info.value) == "unknown plugin(s): nope. valid plugins: a, b"
+
+
+def test_select_plugins_disables_skipped_plugins_in_registry_order() -> None:
+    """Verify a run naming no plugins leaves skip-listed plugins out and reports them disabled."""
+    # Given
+    registry = {name: make_plugin(name=name) for name in ("a", "b", "c")}
+
+    # When
+    selection = select_plugins(registry, [], skip=frozenset({"c", "a"}))
+
+    # Then
+    assert [p.name for p in selection.plugins] == ["b"]
+    assert selection.disabled == [
+        SkippedPlugin(name="a", reason=SkipReason.DISABLED),
+        SkippedPlugin(name="c", reason=SkipReason.DISABLED),
+    ]
+
+
+def test_select_plugins_runs_named_plugins_despite_skip() -> None:
+    """Verify naming a skip-listed plugin selects it and disables nothing."""
+    # Given
+    registry = {name: make_plugin(name=name) for name in ("a", "b")}
+
+    # When
+    selection = select_plugins(registry, ["a"], skip=frozenset({"a"}))
+
+    # Then
+    assert [p.name for p in selection.plugins] == ["a"]
+    assert selection.disabled == []
+
+
+def test_disabled_plugin_hooks_never_run(mocker: MockerFixture) -> None:
+    """Verify selecting a disabled plugin runs none of its hooks."""
+    # Given
+    hook = mocker.Mock(return_value=True)
+    registry = {"a": make_plugin(name="a", prepare=hook, is_available=hook)}
+
+    # When
+    selection = select_plugins(registry, [], skip=frozenset({"a"}))
+
+    # Then
+    assert selection.plugins == []
+    hook.assert_not_called()
 
 
 def test_discover_plugins_default_returns_independent_copies() -> None:

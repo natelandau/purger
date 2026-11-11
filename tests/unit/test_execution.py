@@ -7,6 +7,7 @@ from pytest_mock import MockerFixture
 from purger.execution import execute, mark_unfinished, record_freed
 from purger.plugin import Plugin
 from purger.reports import ActionReport, PluginReport, Status
+from purger.sizing import PreparedPaths
 from tests.conftest import make_action, make_plugin
 
 
@@ -103,7 +104,7 @@ def test_record_freed_sets_difference_and_clamps(mocker: MockerFixture) -> None:
     mocker.patch(
         "purger.execution.measure_footprint",
         autospec=True,
-        side_effect=lambda plugin, *, include_dangerous: after[plugin.name],
+        side_effect=lambda plugin, *, include_dangerous, prepared_paths: after[plugin.name],
     )
 
     # When
@@ -136,7 +137,7 @@ def test_record_freed_interrupt_clears_sizes_already_measured(mocker: MockerFixt
     first = _plugin_report("first", "a", footprint=100)
     second = _plugin_report("second", "a", footprint=100)
 
-    def measure(plugin: Plugin, *, include_dangerous: bool) -> int:
+    def measure(plugin: Plugin, *, include_dangerous: bool, prepared_paths: PreparedPaths) -> int:
         if plugin.name == "second":
             raise KeyboardInterrupt
         return 40
@@ -150,6 +151,22 @@ def test_record_freed_interrupt_clears_sizes_already_measured(mocker: MockerFixt
     assert interrupted is True
     assert [r.after_bytes for r in (first, second)] == [None, None]
     assert [r.freed_bytes for r in (first, second)] == [None, None]
+
+
+def test_record_freed_remeasures_each_plugins_prepared_paths(mocker: MockerFixture) -> None:
+    """Verify re-measuring hands each plugin the prepared paths from its first measurement."""
+    # Given
+    report = _plugin_report("one", "a", footprint=100)
+    report.prepared_paths = {"a": (Path("/kept"),)}
+    measure = mocker.patch("purger.execution.measure_footprint", autospec=True, return_value=40)
+
+    # When
+    record_freed([report], dangerous=True, show_progress=False)
+
+    # Then
+    measure.assert_called_once_with(
+        report.plugin, include_dangerous=True, prepared_paths={"a": (Path("/kept"),)}
+    )
 
 
 def test_record_freed_nothing_ran_measures_nothing(mocker: MockerFixture) -> None:

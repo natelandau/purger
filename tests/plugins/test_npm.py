@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from pytest_mock import MockerFixture
 
+from purger.config import Config
 from purger.output import is_partial
 from purger.plugins import npm
 from purger.plugins.npm import _explain_npx_failure
@@ -25,7 +26,9 @@ def test_npm_footprint_counts_only_cleanable_parts(tmp_path: Path, mocker: Mocke
     )
 
     # When
-    report = measure_plugin(npm.PLUGIN, include_dangerous=True)
+    report = measure_plugin(
+        npm.PLUGIN, include_dangerous=True, settings=Config().settings_for(npm.PLUGIN)
+    )
 
     # Then
     assert report.footprint_bytes == disk_usage([tmp_path / "_cacache", tmp_path / "_npx"])
