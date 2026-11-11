@@ -1,10 +1,7 @@
 """Plugin for Ansible's leftover temp folders and Galaxy response cache."""
 
-import re
-from pathlib import Path
-
 from purger.plugin import Action, Plugin, Tier
-from purger.plugins._shared import env_dir, process_running
+from purger.plugins._shared import env_dir, program_matcher
 from purger.sizing import expand_paths
 
 
@@ -24,47 +21,21 @@ _HOMES = _ansible_homes()
 _TMP_PATHS = tuple(f"{home}/tmp/*" for home in _HOMES)  # noqa: S108  # Ansible home, not /tmp
 _GALAXY_PATHS = tuple(f"{home}/galaxy_cache/*" for home in _HOMES)
 
-_ANSIBLE_EXECUTABLE = re.compile(r"ansible(-[a-z]+)?")
 
-
-def _is_ansible_command(cmdline: list[str]) -> bool:
-    """Report whether a process argv runs an `ansible` or `ansible-*` command.
-
-    Only the executable and the first non-option argument after it are checked,
-    since a shebang launch puts the interpreter first, then any shebang flags
-    (such as `python3 -s`), then the script.
-
-    Args:
-        cmdline: The process argv.
+def _has_leftovers() -> bool:
+    """Report whether there are temp folders or Galaxy responses to clean.
 
     Returns:
-        bool: True when the executable or script is an ansible command.
+        bool: True when a cache path has contents.
     """
-    if not cmdline:
-        return False
-    script = next((arg for arg in cmdline[1:] if not arg.startswith("-")), None)
-    return any(
-        _ANSIBLE_EXECUTABLE.fullmatch(Path(arg).name)
-        for arg in (cmdline[0], script)
-        if arg is not None
-    )
-
-
-def _is_available() -> bool:
-    """Report whether there is something to clean and no ansible run that could be using it.
-
-    Returns:
-        bool: True when a cache path has contents and no ansible process is running.
-    """
-    return bool(expand_paths(_TMP_PATHS + _GALAXY_PATHS)) and not process_running(
-        _is_ansible_command
-    )
+    return bool(expand_paths(_TMP_PATHS + _GALAXY_PATHS))
 
 
 PLUGIN = Plugin(
     name="ansible",
     description="Ansible leftover temp folders and Galaxy cache",
-    is_available=_is_available,
+    is_available=_has_leftovers,
+    busy_process=program_matcher(r"ansible(-[a-z]+)?"),
     actions=(
         Action(
             name="tmp",

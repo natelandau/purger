@@ -5,6 +5,7 @@ from pathlib import Path
 from nclutils.sh import run_command
 
 from purger.plugin import Action, Plugin, Tier
+from purger.plugins._shared import program_matcher
 from purger.sizing import SIZE_CMD_TIMEOUT_SECONDS, disk_usage, printed_dir_usage
 
 
@@ -47,6 +48,11 @@ PLUGIN = Plugin(
     requires="pnpm",
     size_cmd=("pnpm", "store", "path"),
     parse_size=printed_dir_usage,
+    # Package scripts such as `pnpm run dev` can run for hours and leave the store alone.
+    busy_process=program_matcher(
+        r"pnp[mx](\.c?js)?",
+        ignore_subcommands=frozenset({"run", "run-script", "exec", "start", "test", "t"}),
+    ),
     actions=(
         Action(
             name="prune",

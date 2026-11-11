@@ -12,6 +12,7 @@ from nclutils.sh import CompletedCommand, ShellCommandNotFoundError
 from pytest_mock import MockerFixture
 
 from purger.output import is_partial
+from purger.plugin import Plugin
 from purger.plugins import (
     ansible,
     apt,
@@ -575,23 +576,11 @@ def test_rip2_measures_printed_graveyard(tmp_path: Path, mocker: MockerFixture) 
     assert report.footprint_bytes == disk_usage([tmp_path])
 
 
-@pytest.mark.parametrize(
-    ("leftover", "cmdline", "expected"),
-    [
-        (True, ["/usr/bin/python3", "/Users/me/.local/bin/purger", "clean", "ansible"], True),
-        (False, ["/bin/zsh"], False),
-        (True, ["/usr/bin/python3", "/Users/me/.local/bin/ansible-playbook", "site.yml"], False),
-    ],
-    ids=["idle-with-leftovers", "nothing-to-clean", "ansible-running"],
-)
-def test_ansible_available_only_when_idle_with_leftovers(
-    leftover: bool,
-    cmdline: list[str],
-    expected: bool,
-    tmp_path: Path,
-    mocker: MockerFixture,
+@pytest.mark.parametrize("leftover", [True, False], ids=["leftovers", "nothing-to-clean"])
+def test_ansible_available_only_with_leftovers(
+    leftover: bool, tmp_path: Path, mocker: MockerFixture
 ) -> None:
-    """Verify the plugin applies only with leftovers to clean and no ansible process using them."""
+    """Verify the plugin applies only with leftovers to clean."""
     # Given
     if leftover:
         stale = tmp_path / ".ansible" / "tmp" / "ansible-tmp-1747399837.59-86917-2270"
@@ -599,42 +588,73 @@ def test_ansible_available_only_when_idle_with_leftovers(
     mocker.patch("purger.sizing.invoking_home", return_value=tmp_path)
     mocker.patch.object(ansible, "_TMP_PATHS", ("~/.ansible/tmp/*",))
     mocker.patch.object(ansible, "_GALAXY_PATHS", ("~/.ansible/galaxy_cache/*",))
-    process = mocker.Mock(info={"cmdline": cmdline})
-    mocker.patch("purger.plugins._shared.psutil.process_iter", return_value=[process])
     assert ansible.PLUGIN.is_available is not None
 
     # When / Then
-    assert ansible.PLUGIN.is_available() is expected
+    assert ansible.PLUGIN.is_available() is leftover
+
+
+_PY = "/usr/bin/python3"
+_NODE = "/opt/homebrew/bin/node"
+_BREW = "/opt/homebrew/Library/Homebrew"
 
 
 @pytest.mark.parametrize(
-    "cmdline",
+    ("plugin", "cmdline", "expected"),
     [
-        ["/usr/bin/python3", "/Users/me/.local/bin/ansible-playbook", "site.yml"],
-        ["/usr/bin/python3", "-sP", "/usr/bin/ansible-playbook", "site.yml"],
-        ["/opt/homebrew/bin/ansible", "all", "-m", "ping"],
-        ["ansible-galaxy", "install", "-r", "requirements.yml"],
+        (ansible.PLUGIN, [_PY, "/Users/me/.local/bin/ansible-playbook", "site.yml"], True),
+        (ansible.PLUGIN, [_PY, "-sP", "/usr/bin/ansible-playbook", "site.yml"], True),
+        (ansible.PLUGIN, ["/opt/homebrew/bin/ansible", "all", "-m", "ping"], True),
+        (ansible.PLUGIN, ["ansible-galaxy", "install", "-r", "requirements.yml"], True),
+        (ansible.PLUGIN, [_PY, "/Users/me/.local/bin/purger", "clean", "ansible"], False),
+        (ansible.PLUGIN, ["vim", "/Users/me/.ansible/notes"], False),
+        (ansible.PLUGIN, [_PY, "/Users/me/.local/share/ansible/script.py"], False),
+        (ansible.PLUGIN, [], False),
+        (brew.PLUGIN, ["/bin/bash", "-p", f"{_BREW}/brew.sh", "install", "jq"], True),
+        (
+            brew.PLUGIN,
+            [
+                f"{_BREW}/vendor/portable-ruby/current/bin/ruby",
+                "-W1",
+                f"{_BREW}/brew.rb",
+                "upgrade",
+            ],
+            True,
+        ),
+        (brew.PLUGIN, ["/opt/homebrew/bin/brew", "update"], True),
+        (brew.PLUGIN, ["/opt/homebrew/bin/brewx"], False),
+        (npm.PLUGIN, [_NODE, "/opt/homebrew/bin/npm", "install"], True),
+        (npm.PLUGIN, ["npm install left-pad", "", "", ""], True),
+        (npm.PLUGIN, [_NODE, "/opt/homebrew/lib/node_modules/npm/bin/npm-cli.js", "ci"], True),
+        (npm.PLUGIN, [_NODE, "/opt/homebrew/bin/npx", "ccstatusline@latest"], False),
+        (npm.PLUGIN, ["npm exec @upstash/context7-mcp", "", "", "", ""], False),
+        (npm.PLUGIN, [_NODE, "/opt/homebrew/bin/npm", "--yes", "x", "cowsay"], False),
+        (npm.PLUGIN, ["/Applications/My App/node", "/opt/homebrew/bin/npm", "ci"], True),
+        (npm.PLUGIN, ["npm", "ci"], True),
+        (npm.PLUGIN, [_NODE, "/opt/homebrew/bin/npm", "run", "dev"], False),
+        (npm.PLUGIN, ["npm run dev", "", ""], False),
+        (npm.PLUGIN, [_NODE, "server.js"], False),
+        (pnpm.PLUGIN, ["/Users/me/Library/pnpm/pnpm", "install"], True),
+        (pnpm.PLUGIN, [_NODE, "/Users/me/.cache/node/corepack/pnpm/9.1.0/bin/pnpm.cjs", "i"], True),
+        (pnpm.PLUGIN, [_NODE, "/opt/homebrew/bin/npm", "install"], False),
+        (pnpm.PLUGIN, ["/Users/me/Library/pnpm/pnpm", "run", "dev"], False),
+        (yarn.PLUGIN, [_NODE, "/opt/homebrew/bin/yarn", "install"], True),
+        (yarn.PLUGIN, [_NODE, "/repo/.yarn/releases/yarn-4.5.0.cjs", "install"], True),
+        (yarn.PLUGIN, [_NODE, "/repo/yarn-audit.js"], False),
+        (yarn.PLUGIN, [_NODE, "/opt/homebrew/bin/yarn", "run", "dev"], False),
+        (pip.PLUGIN, [_PY, "-m", "pip", "install", "requests"], True),
+        (pip.PLUGIN, ["/Users/me/.venv/bin/pip3.12", "install", "-r", "requirements.txt"], True),
+        (pip.PLUGIN, [_PY, "/Users/me/.venv/bin/pip", "download", "x"], True),
+        (pip.PLUGIN, [_PY, "-m", "pipx", "install", "x"], False),
     ],
 )
-def test_ansible_command_detected(cmdline: list[str]) -> None:
-    """Verify ansible commands count as running however they were started."""
-    # Given / When / Then
-    assert ansible._is_ansible_command(cmdline) is True
+def test_busy_process_matches_tool_runs(plugin: Plugin, cmdline: list[str], expected: bool) -> None:
+    """Verify each plugin counts its tool as busy however it was launched, and nothing else."""
+    # Given
+    assert plugin.busy_process is not None
 
-
-@pytest.mark.parametrize(
-    "cmdline",
-    [
-        ["/usr/bin/python3", "/Users/me/.local/bin/purger", "clean", "ansible"],
-        ["vim", "/Users/me/.ansible/notes"],
-        ["/usr/bin/python3", "/Users/me/.local/share/ansible/script.py"],
-        [],
-    ],
-)
-def test_ansible_command_not_detected(cmdline: list[str]) -> None:
-    """Verify purger itself, unrelated commands, and unreadable argv do not count as ansible."""
-    # Given / When / Then
-    assert ansible._is_ansible_command(cmdline) is False
+    # When / Then
+    assert plugin.busy_process(cmdline) is expected
 
 
 @pytest.mark.parametrize(
@@ -728,35 +748,37 @@ def test_maestro_output_follows_xdg_state_home(
     assert maestro._test_output_patterns() == expected
 
 
-@pytest.mark.parametrize(
-    ("has_output", "cmdline", "expected"),
-    [
-        (True, ["/bin/zsh"], True),
-        (False, ["/bin/zsh"], False),
-        (True, ["/usr/bin/java", "-classpath", "/x/lib/*", "maestro.cli.AppKt", "test"], False),
-        (True, None, True),
-    ],
-    ids=["idle-with-output", "nothing-to-clean", "maestro-running", "unreadable-argv"],
-)
-def test_maestro_available_only_when_idle_with_output(
-    has_output: bool,
-    cmdline: list[str] | None,
-    expected: bool,
-    tmp_path: Path,
-    mocker: MockerFixture,
+@pytest.mark.parametrize("has_output", [True, False], ids=["output", "nothing-to-clean"])
+def test_maestro_available_only_with_output(
+    has_output: bool, tmp_path: Path, mocker: MockerFixture
 ) -> None:
-    """Verify the plugin applies only with output to clean and no Maestro run writing to it."""
+    """Verify the plugin applies only with run output to clean."""
     # Given
     if has_output:
         (tmp_path / ".maestro" / "tests" / "2026-11-10_041643").mkdir(parents=True)
     mocker.patch("purger.sizing.invoking_home", return_value=tmp_path)
     mocker.patch.object(maestro, "_TEST_OUTPUT_PATHS", ("~/.maestro/tests/*",))
-    process = mocker.Mock(info={"cmdline": cmdline})
-    mocker.patch("purger.plugins._shared.psutil.process_iter", return_value=[process])
     assert maestro.PLUGIN.is_available is not None
 
     # When / Then
-    assert maestro.PLUGIN.is_available() is expected
+    assert maestro.PLUGIN.is_available() is has_output
+
+
+@pytest.mark.parametrize(
+    ("cmdline", "expected"),
+    [
+        (["/usr/bin/java", "-classpath", "/x/lib/*", "maestro.cli.AppKt", "test"], True),
+        (["/bin/zsh"], False),
+    ],
+    ids=["maestro", "other"],
+)
+def test_maestro_busy_while_maestro_runs(cmdline: list[str], expected: bool) -> None:
+    """Verify only a Maestro JVM process makes the plugin busy."""
+    # Given
+    assert maestro.PLUGIN.busy_process is not None
+
+    # When / Then
+    assert maestro.PLUGIN.busy_process(cmdline) is expected
 
 
 @pytest.mark.parametrize(

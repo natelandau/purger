@@ -1,7 +1,7 @@
 """Plugin for the pip download and wheel cache."""
 
 from purger.plugin import Action, Plugin, Tier
-from purger.plugins._shared import env_dir
+from purger.plugins._shared import env_dir, program_matcher
 from purger.sizing import expand_paths
 
 
@@ -35,6 +35,7 @@ PLUGIN = Plugin(
     name="pip",
     description="pip download and wheel cache",
     is_available=_has_cache,
+    busy_process=program_matcher(r"pip(3(\.\d+)?)?"),
     actions=(
         Action(
             name="cache",

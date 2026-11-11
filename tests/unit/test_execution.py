@@ -177,3 +177,40 @@ def test_execute_without_home_refuses_path_deletion(mocker: MockerFixture) -> No
 
     # Then
     assert not run_action.call_args.kwargs["home"].is_absolute()
+
+
+def test_execute_skips_plugin_whose_tool_started(mocker: MockerFixture) -> None:
+    """Verify a plugin whose tool started after measuring is skipped, and the rest still run."""
+    # Given a busy first plugin and an idle second one
+    busy = _plugin_report("busy", "a", "b")
+    idle = _plugin_report("idle", "c")
+    mocker.patch("purger.execution.is_busy", side_effect=lambda plugin: plugin.name == "busy")
+    run_action = mocker.patch("purger.execution.run_action", autospec=True, side_effect=_mark_done)
+
+    # When
+    result = execute([busy, idle], [*busy.actions, *idle.actions], verbose=False, interactive=False)
+
+    # Then
+    assert [c.args[0].action.name for c in run_action.call_args_list] == ["c"]
+    assert [(r.status, r.error) for r in busy.actions] == [
+        (Status.SKIPPED, "busy"),
+        (Status.SKIPPED, "busy"),
+    ]
+    assert result.ran == [idle]
+
+
+def test_execute_checks_busy_only_for_plugins_with_approved_actions(
+    mocker: MockerFixture,
+) -> None:
+    """Verify the busy check runs once per plugin that has work, not per action."""
+    # Given
+    one = _plugin_report("one", "a", "b")
+    two = _plugin_report("two", "c")
+    is_busy = mocker.patch("purger.execution.is_busy", return_value=False)
+    mocker.patch("purger.execution.run_action", autospec=True, side_effect=_mark_done)
+
+    # When
+    execute([one, two], list(one.actions), verbose=False, interactive=False)
+
+    # Then
+    is_busy.assert_called_once_with(one.plugin)

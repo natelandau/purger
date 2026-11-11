@@ -1,7 +1,7 @@
 """Plugin for the per-run test output Maestro keeps for every `maestro test`."""
 
 from purger.plugin import Action, Plugin, Tier
-from purger.plugins._shared import env_dir, process_running
+from purger.plugins._shared import env_dir
 from purger.sizing import expand_paths
 
 # The JVM main class the maestro launcher runs, for test runs, studio, and mcp alike.
@@ -36,19 +36,20 @@ def _is_maestro_command(cmdline: list[str]) -> bool:
     return _MAESTRO_MAIN_CLASS in cmdline
 
 
-def _is_available() -> bool:
-    """Report whether there is run output to clean and no Maestro run that could be writing it.
+def _has_output() -> bool:
+    """Report whether there is run output to clean.
 
     Returns:
-        bool: True when an output folder exists and Maestro is not running.
+        bool: True when an output folder exists.
     """
-    return bool(expand_paths(_TEST_OUTPUT_PATHS)) and not process_running(_is_maestro_command)
+    return bool(expand_paths(_TEST_OUTPUT_PATHS))
 
 
 PLUGIN = Plugin(
     name="maestro",
     description="Maestro test run logs, screenshots, and local recordings",
-    is_available=_is_available,
+    is_available=_has_output,
+    busy_process=_is_maestro_command,
     actions=(
         Action(
             name="test-output",
