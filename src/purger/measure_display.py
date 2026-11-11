@@ -17,7 +17,7 @@ class MeasureDisplay:
     """Show one live row per plugin so slow measurements are visible while others finish.
 
     Each row shows a spinner and a pulsing bar until its plugin is measured, then a full
-    bar with the plugin's footprint or why it was skipped. The bar pulses rather than
+    bar with the plugin's total size or why it was skipped. The bar pulses rather than
     fills because tool size commands report no progress. The display clears itself on
     exit because the results table printed afterward carries the same numbers.
     """
@@ -57,7 +57,7 @@ class MeasureDisplay:
         self._progress.stop()
 
     def finish(self, name: str, result: PluginReport | SkippedPlugin) -> None:
-        """Mark a plugin's row done and show its footprint or skip reason.
+        """Mark a plugin's row done and show its total size or skip reason.
 
         Args:
             name: The plugin name the row was created for.
@@ -65,8 +65,8 @@ class MeasureDisplay:
         """
         if isinstance(result, SkippedPlugin):
             status = f"[dim]skipped ({result.reason.value})[/]"
-        elif result.footprint_bytes is None:
+        elif result.total_size_bytes is None:
             status = "[dim]size unknown[/]"
         else:
-            status = human_size(result.footprint_bytes)
+            status = human_size(result.total_size_bytes)
         self._progress.update(self._tasks[name], total=1, completed=1, status=status)

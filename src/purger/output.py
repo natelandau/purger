@@ -2,6 +2,7 @@
 
 import shlex
 import sys
+from dataclasses import dataclass
 from typing import Any
 
 from nclutils.strings import human_size
@@ -13,7 +14,7 @@ from rich.table import Table
 from rich.text import Text
 
 from purger.details import largest_first, merge
-from purger.plugin import Detail
+from purger.plugin import SizeBreakdownRow
 from purger.reports import ActionReport, PluginReport, SkippedPlugin, sum_known
 
 SCHEMA_VERSION = 1
@@ -22,15 +23,15 @@ _CHECK = "\u2713"
 
 
 def grand_total(reports: list[PluginReport]) -> int | None:
-    """Sum the known plugin footprints so callers can report one overall figure.
+    """Sum the known plugin total sizes so callers can report one overall figure.
 
     Args:
         reports: Plugin reports to total.
 
     Returns:
-        The sum of known footprints, or None when no footprint is known.
+        The sum of known total sizes, or None when no total size is known.
     """
-    return sum_known(r.footprint_bytes for r in reports)
+    return sum_known(r.total_size_bytes for r in reports)
 
 
 def _size_text(size: int | None) -> str:
@@ -41,7 +42,7 @@ def is_partial(report: PluginReport) -> bool:
     """Report whether a clean would free only part of a tool's measured size.
 
     A tool is exact when every included action has a known size, or when the
-    known sizes cover the whole footprint, such as a full-wipe action under
+    known sizes cover the whole total size, such as a full-wipe action under
     `--dangerous`, or when there is nothing to free. The report holds only the
     actions this run includes.
 
@@ -54,16 +55,17 @@ def is_partial(report: PluginReport) -> bool:
     sizes = [action.size_bytes for action in report.actions]
     if None not in sizes:
         return False
-    # An unknown size outside the footprint means a zero footprint may still hide data.
+    # An unknown size outside the total size means a zero total size may still hide data.
     unknown_outside = any(
-        action.size_bytes is None and action.action.outside_footprint for action in report.actions
+        action.size_bytes is None and action.action.adds_to_plugin_total_size
+        for action in report.actions
     )
-    if report.footprint_bytes == 0 and not unknown_outside:
+    if report.total_size_bytes == 0 and not unknown_outside:
         return False
     known = sum_known(sizes)
-    if report.footprint_bytes is None or known is None:
+    if report.total_size_bytes is None or known is None:
         return True
-    return known < report.footprint_bytes
+    return known < report.total_size_bytes
 
 
 def _table() -> Table:
@@ -97,7 +99,7 @@ def render_table(reports: list[PluginReport]) -> Table:
     for report, partial in rows:
         table.add_row(
             f"[bold]{escape(report.plugin.name)}[/bold]",
-            _size_text(report.footprint_bytes),
+            _size_text(report.total_size_bytes),
             _CHECK if partial else "",
             escape(report.plugin.description),
         )
@@ -118,7 +120,7 @@ def render_results(ran: list[PluginReport]) -> Table:
     table = _table()
     table.add_column("Cache", footer="Total")
     for title, values in (
-        ("Before", [r.footprint_bytes for r in measured]),
+        ("Before", [r.total_size_bytes for r in measured]),
         ("After", [r.after_bytes for r in measured]),
         ("Freed", [r.freed_bytes for r in measured]),
     ):
@@ -126,7 +128,7 @@ def render_results(ran: list[PluginReport]) -> Table:
     for report in sorted(ran, key=lambda r: largest_first(r.freed_bytes, r.plugin.name)):
         table.add_row(
             f"[bold]{escape(report.plugin.name)}[/bold]",
-            _size_text(report.footprint_bytes),
+            _size_text(report.total_size_bytes),
             _size_text(report.after_bytes),
             _size_text(report.freed_bytes),
         )
@@ -186,6 +188,17 @@ def _branch(
         yield line
 
 
+@dataclass(frozen=True)
+class _TreeRow:
+    """One row of a `_RowTree`, already formatted for display."""
+
+    label: str
+    size: str
+    items: str = ""
+    paths: tuple[str, ...] = ()
+    dim: bool = False
+
+
 class _RowTree:
     """Hang rows from the line above with tree connectors, and paths from each row at `-vv`.
 
@@ -194,39 +207,39 @@ class _RowTree:
     on a narrow terminal the label folds and the size is never cut.
     """
 
-    def __init__(self, lines: list[tuple[str, str, str, list[str], bool]]) -> None:
-        self._lines = lines
+    def __init__(self, rows: list[_TreeRow]) -> None:
+        self._rows = rows
 
     def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
-        size_width = max(len(size) for _, size, _, _, _ in self._lines)
-        items_width = min(max(len(items) for _, _, items, _, _ in self._lines), _MIN_ITEMS_WIDTH)
+        size_width = max(len(row.size) for row in self._rows)
+        items_width = min(max(len(row.items) for row in self._rows), _MIN_ITEMS_WIDTH)
         # 4 = the two 2-cell gaps between the three columns.
         room = options.max_width - _BRANCH_WIDTH - size_width - items_width - 4
-        label_width = max(1, min(max(len(label) for label, _, _, _, _ in self._lines), room))
-        last_row = len(self._lines) - 1
-        for row_index, (label, size, items, paths, dim) in enumerate(self._lines):
+        label_width = max(1, min(max(len(row.label) for row in self._rows), room))
+        last_row = len(self._rows) - 1
+        for row_index, row in enumerate(self._rows):
             grid = Table.grid(padding=(0, 2))
             grid.add_column(width=label_width, overflow="fold")
             grid.add_column(width=size_width, justify="right", no_wrap=True)
             grid.add_column(overflow="fold")
-            style = "dim" if dim else ""
-            grid.add_row(Text(label, style=style), Text(size, style=style), Text(items))
+            style = "dim" if row.dim else ""
+            grid.add_row(Text(row.label, style=style), Text(row.size, style=style), Text(row.items))
             row_last = row_index == last_row
             yield from _branch(console, options, grid, lead=Text(), last=row_last)
             # A path's lead keeps the row's own guide running while later rows follow.
             lead = Text.assemble("  ", (" " if row_last else _PIPE.strip(), "sub.pipe"))
-            for path_index, path in enumerate(paths):
+            for path_index, path in enumerate(row.paths):
                 yield from _branch(
                     console,
                     options,
                     Text(path, style="dim"),
                     lead=lead,
-                    last=path_index == len(paths) - 1,
+                    last=path_index == len(row.paths) - 1,
                 )
 
 
 def _detail_rows(
-    rows: list[Detail], *, verbosity: int, trailer: tuple[str, str] | None = None
+    rows: list[SizeBreakdownRow], *, verbosity: int, trailer: tuple[str, str] | None = None
 ) -> _RowTree:
     """Prepare every row for display, with its paths only at `-vv`.
 
@@ -240,19 +253,18 @@ def _detail_rows(
         _RowTree: The rows, ready to draw.
     """
     full = verbosity >= 2  # noqa: PLR2004
-    lines = [
-        (
-            row.label if full else _shorten(row.label),
-            _size_text(row.size_bytes),
-            ", ".join(row.items),
-            [str(path) for path in row.paths] if full else [],
-            False,
+    tree_rows = [
+        _TreeRow(
+            label=row.label if full else _shorten(row.label),
+            size=_size_text(row.size_bytes),
+            items=", ".join(row.item_names),
+            paths=tuple(str(path) for path in row.paths) if full else (),
         )
         for row in rows
     ]
     if trailer is not None:
-        lines.append((trailer[0], trailer[1], "", [], True))
-    return _RowTree(lines)
+        tree_rows.append(_TreeRow(label=trailer[0], size=trailer[1], dim=True))
+    return _RowTree(tree_rows)
 
 
 def _indented(block: RenderableType) -> Padding:
@@ -260,21 +272,26 @@ def _indented(block: RenderableType) -> Padding:
     return Padding(block, (0, 0, 0, 2))
 
 
-def _remainder(report: PluginReport, rows: list[Detail]) -> tuple[str, int] | None:
-    """Name and size the part of the footprint that no row covers, so the section adds up."""
+def _remainder(report: PluginReport, rows: list[SizeBreakdownRow]) -> tuple[str, str] | None:
+    """Name and size the part of the total size that no row covers, so the section adds up.
+
+    Returns:
+        tuple[str, str] | None: The label and formatted size, or None when the rows cover it all.
+    """
     listed = sum_known(row.size_bytes for row in rows)
-    if report.footprint_bytes is None or listed is None or listed >= report.footprint_bytes:
+    if report.total_size_bytes is None or listed is None or listed >= report.total_size_bytes:
         return None
     # An action without rows that may free data, even an unknown amount, could cover the gap.
     unlisted = any(action.size_bytes != 0 and not action.details for action in report.actions)
-    return ("not listed" if unlisted else "not cleaned", report.footprint_bytes - listed)
+    label = "not listed" if unlisted else "not cleaned"
+    return label, _size_text(report.total_size_bytes - listed)
 
 
 def _header(report: PluginReport) -> str:
     """Name a plugin's section with what the table row showed: size, description, partial mark."""
     partial = "  [dim](partial purge)[/dim]" if is_partial(report) else ""
     return (
-        f"[bold]{escape(report.plugin.name)}[/bold]  {_size_text(report.footprint_bytes)}"
+        f"[bold]{escape(report.plugin.name)}[/bold]  {_size_text(report.total_size_bytes)}"
         f"  {escape(report.plugin.description)}{partial}"
     )
 
@@ -284,9 +301,7 @@ def _merged_rows(report: PluginReport, *, verbosity: int) -> RenderableType | No
     rows = merge(row for action in report.actions for row in action.details)
     if not rows:
         return None
-    remainder = _remainder(report, rows)
-    trailer = None if remainder is None else (remainder[0], _size_text(remainder[1]))
-    return _detail_rows(rows, verbosity=verbosity, trailer=trailer)
+    return _detail_rows(rows, verbosity=verbosity, trailer=_remainder(report, rows))
 
 
 def _rows_by_action(report: PluginReport, *, verbosity: int) -> list[RenderableType]:
@@ -302,7 +317,7 @@ def _rows_by_action(report: PluginReport, *, verbosity: int) -> list[RenderableT
             continue
         parts.append(
             Padding(
-                f"{escape(action.action.name)} ({action.action.tier.value})"
+                f"{escape(action.action.name)} ({action.action.risk_level.value})"
                 f"  {_size_text(action.size_bytes)}",
                 (0, 0, 0, 2),
             )
@@ -355,10 +370,10 @@ def action_summary(report: ActionReport) -> str:
     Returns:
         str: The item count and size for a path action, or the command it runs.
     """
-    action = report.action
-    if action.command is not None:
-        sudo = "sudo " if action.needs_sudo else ""
-        return f"would run {sudo}{shlex.join(action.command)}"
+    command = report.action.cleanup_command
+    if command is not None:
+        sudo = "sudo " if command.with_sudo else ""
+        return f"would run {sudo}{shlex.join(command.argv)}"
     count = len(report.resolved_paths)
     noun = "item" if count == 1 else "items"
     return f"would delete {count} {noun}, {_size_text(report.size_bytes)}"
@@ -366,19 +381,20 @@ def action_summary(report: ActionReport) -> str:
 
 def _action_dict(report: ActionReport) -> dict[str, Any]:
     action = report.action
+    command = action.cleanup_command
     return {
         "name": action.name,
-        "tier": action.tier.value,
-        "help": action.help,
+        "tier": action.risk_level.value,
+        "help": action.description,
         "size_bytes": report.size_bytes,
-        "command": list(action.command) if action.command is not None else None,
+        "command": list(command.argv) if command is not None else None,
         "paths": [str(p) for p in report.resolved_paths],
-        "needs_sudo": action.needs_sudo,
+        "needs_sudo": action.runs_with_sudo,
         "details": [
             {
                 "label": row.label,
                 "size_bytes": row.size_bytes,
-                "items": list(row.items),
+                "items": list(row.item_names),
                 "paths": [str(path) for path in row.paths],
             }
             for row in report.details
@@ -392,25 +408,15 @@ def _document(
     *,
     include_results: bool,
 ) -> dict[str, Any]:
-    plugins = []
-    for report in reports:
-        actions = []
-        for action_report in report.actions:
-            data = _action_dict(action_report)
-            if include_results:
-                data["status"] = action_report.status.value if action_report.status else None
-                data["error"] = action_report.error
-            actions.append(data)
-        plugin: dict[str, Any] = {
+    plugins: list[dict[str, Any]] = [
+        {
             "name": report.plugin.name,
             "description": report.plugin.description,
-            "footprint_bytes": report.footprint_bytes,
-            "actions": actions,
+            "footprint_bytes": report.total_size_bytes,
+            "actions": [_action_dict(action_report) for action_report in report.actions],
         }
-        if include_results:
-            plugin["freed_bytes"] = report.freed_bytes
-        plugins.append(plugin)
-
+        for report in reports
+    ]
     document: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "platform": sys.platform,
@@ -419,6 +425,11 @@ def _document(
         "skipped": [{"name": s.name, "reason": s.reason.value} for s in skipped],
     }
     if include_results:
+        for report, plugin in zip(reports, plugins, strict=True):
+            for action_report, action in zip(report.actions, plugin["actions"], strict=True):
+                action["status"] = action_report.status.value if action_report.status else None
+                action["error"] = action_report.error
+            plugin["freed_bytes"] = report.freed_bytes
         document["total_freed_bytes"] = sum_known(r.freed_bytes for r in reports)
     return document
 

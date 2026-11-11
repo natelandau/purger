@@ -1,6 +1,7 @@
 """Tests for the plugin registry."""
 
 import importlib
+import logging
 import sys
 import textwrap
 from collections.abc import Callable, Iterator
@@ -12,13 +13,19 @@ import psutil
 import pytest
 from pytest_mock import MockerFixture
 
-from purger.config import PluginSettings
+from purger.plugin import (
+    OperatingSystem,
+    Plugin,
+    PluginSettings,
+    Setting,
+)
 from purger.registry import (
     DuplicatePluginError,
     ProcessTable,
     UnknownPluginError,
     discover_plugins,
     is_busy,
+    is_configured,
     select_plugins,
     skip_reason,
 )
@@ -28,12 +35,20 @@ from tests.conftest import make_plugin
 _OWN_PID = 4242
 
 _PLUGIN_SRC = """
-from purger.plugin import Action, Plugin, Tier
+from purger.plugin import Action, Plugin, RiskLevel, RunCommand, SizeUnknown
 
 PLUGIN = Plugin(
     name={name!r},
     description="d",
-    actions=(Action(name="a", tier=Tier.SAFE, help="Remove a.", command=("true",)),),
+    actions=(
+        Action(
+            name="a",
+            risk_level=RiskLevel.SAFE,
+            description="Remove a.",
+            cleanup=RunCommand("true"),
+            size=SizeUnknown(reason="test action"),
+        ),
+    ),
 )
 """
 
@@ -130,7 +145,7 @@ def test_skip_reason_platform(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify a plugin for another platform is skipped as PLATFORM."""
     # Given a darwin-only plugin on linux
     monkeypatch.setattr(sys, "platform", "linux")
-    plugin = make_plugin(platforms=frozenset({"darwin"}))
+    plugin = make_plugin(operating_systems=(OperatingSystem.MACOS,))
 
     # When
     reason = skip_reason(plugin)
@@ -143,7 +158,7 @@ def test_skip_reason_missing_binary(mocker: MockerFixture) -> None:
     """Verify a missing required binary is skipped as MISSING_BINARY."""
     # Given a plugin whose required binary is not on PATH
     which = mocker.patch("purger.registry.which", autospec=True, return_value=None)
-    plugin = make_plugin(requires="tool")
+    plugin = make_plugin(requires_on_path="tool")
 
     # When
     reason = skip_reason(plugin)
@@ -154,9 +169,9 @@ def test_skip_reason_missing_binary(mocker: MockerFixture) -> None:
 
 
 def test_skip_reason_unavailable() -> None:
-    """Verify a False is_available is skipped unless the check is disabled."""
-    # Given a plugin whose availability hook says no
-    plugin = make_plugin(is_available=lambda: False)
+    """Verify a False skip_unless is skipped unless the check is disabled."""
+    # Given a plugin whose skip_unless function says no
+    plugin = make_plugin(skip_unless=lambda: False)
 
     # When
     checked = skip_reason(plugin)
@@ -167,30 +182,31 @@ def test_skip_reason_unavailable() -> None:
     assert unchecked is None
 
 
-def test_skip_reason_is_available_raises() -> None:
-    """Verify an is_available hook that raises counts as UNAVAILABLE."""
+def test_skip_reason_skip_unless_raises() -> None:
+    """Verify a skip_unless function that raises counts as UNAVAILABLE."""
 
-    # Given an availability hook that raises
+    # Given an skip_unless function that raises
     def boom() -> bool:
         msg = "boom"
         raise RuntimeError(msg)
 
     # When
-    reason = skip_reason(make_plugin(is_available=boom))
+    reason = skip_reason(make_plugin(skip_unless=boom))
 
     # Then
     assert reason is SkipReason.UNAVAILABLE
 
 
-def test_skip_reason_never_runs_prepare() -> None:
-    """Verify skip checks leave the prepare hook to measurement, which decides NOT_CONFIGURED."""
-    # Given a plugin whose prepare hook reports it not configured
+def test_skip_reason_never_runs_the_configuration_check() -> None:
+    """Verify skip checks leave the configuration check to measurement, which decides NOT_CONFIGURED."""
+    # Given a plugin whose configuration check reports it not configured
     calls: list[str] = []
 
-    def prepare(_: PluginSettings) -> None:
-        calls.append("prepare")
+    def is_configured(_: PluginSettings) -> bool:
+        calls.append("is_configured")
+        return False
 
-    plugin = make_plugin(prepare=prepare)
+    plugin = make_plugin(skip_unless_configured=is_configured)
 
     # When
     reason = skip_reason(plugin)
@@ -200,10 +216,10 @@ def test_skip_reason_never_runs_prepare() -> None:
     assert calls == []
 
 
-def test_skip_reason_unavailable_precedes_prepare() -> None:
-    """Verify an unavailable plugin is skipped as UNAVAILABLE even when prepare would say no."""
+def test_skip_reason_unavailable_precedes_the_configuration_check() -> None:
+    """Verify an unavailable plugin is skipped as UNAVAILABLE even when it is not configured."""
     # Given a plugin that is both unavailable and unconfigured
-    plugin = make_plugin(prepare=lambda _: None, is_available=lambda: False)
+    plugin = make_plugin(skip_unless_configured=lambda _: False, skip_unless=lambda: False)
 
     # When
     reason = skip_reason(plugin)
@@ -214,10 +230,10 @@ def test_skip_reason_unavailable_precedes_prepare() -> None:
 
 def test_skip_reason_applicable(monkeypatch: pytest.MonkeyPatch, mocker: MockerFixture) -> None:
     """Verify an applicable plugin has no skip reason."""
-    # Given a linux host where the required binary exists and the hook says yes
+    # Given a linux host where the required binary exists and skip_unless says yes
     monkeypatch.setattr(sys, "platform", "linux")
     mocker.patch("purger.registry.which", autospec=True, return_value=Path("/usr/bin/tool"))
-    plugin = make_plugin(requires="tool", is_available=lambda: True)
+    plugin = make_plugin(requires_on_path="tool", skip_unless=lambda: True)
 
     # When
     reason = skip_reason(plugin)
@@ -275,18 +291,18 @@ def test_select_plugins_runs_named_plugins_despite_skip() -> None:
     assert selection.disabled == []
 
 
-def test_disabled_plugin_hooks_never_run(mocker: MockerFixture) -> None:
-    """Verify selecting a disabled plugin runs none of its hooks."""
+def test_disabled_plugin_checks_never_run(mocker: MockerFixture) -> None:
+    """Verify selecting a disabled plugin runs none of its checks."""
     # Given
-    hook = mocker.Mock(return_value=True)
-    registry = {"a": make_plugin(name="a", prepare=hook, is_available=hook)}
+    check = mocker.Mock(return_value=True)
+    registry = {"a": make_plugin(name="a", skip_unless_configured=check, skip_unless=check)}
 
     # When
     selection = select_plugins(registry, [], skip=frozenset({"a"}))
 
     # Then
     assert selection.plugins == []
-    hook.assert_not_called()
+    check.assert_not_called()
 
 
 def test_discover_plugins_default_returns_independent_copies() -> None:
@@ -324,7 +340,7 @@ def _is_tool(argv: list[str]) -> bool:
     ],
     ids=["tool-running", "other-process", "unreadable-argv", "empty-argv", "purger-subprocess"],
 )
-def test_skip_reason_busy_process(
+def test_skip_reason_skip_while_running(
     cmdline: list[str] | None,
     parent_pids: list[int],
     expected: SkipReason | None,
@@ -337,32 +353,32 @@ def test_skip_reason_busy_process(
     mocker.patch("purger.registry.psutil.process_iter", return_value=[process])
 
     # When
-    reason = skip_reason(make_plugin(busy_process=_is_tool))
+    reason = skip_reason(make_plugin(skip_while_running=_is_tool))
 
     # Then
     assert reason is expected
 
 
-def test_skip_reason_busy_process_unchecked(mocker: MockerFixture) -> None:
+def test_skip_reason_skip_while_running_unchecked(mocker: MockerFixture) -> None:
     """Verify disabling the availability check also skips the process scan."""
     # Given
     process_iter = mocker.patch("purger.registry.psutil.process_iter")
 
     # When
-    reason = skip_reason(make_plugin(busy_process=_is_tool), check_available=False)
+    reason = skip_reason(make_plugin(skip_while_running=_is_tool), check_available=False)
 
     # Then
     assert reason is None
     process_iter.assert_not_called()
 
 
-def test_skip_reason_busy_process_after_is_available(mocker: MockerFixture) -> None:
-    """Verify the process scan is skipped when is_available already says no."""
+def test_skip_reason_skip_while_running_after_skip_unless(mocker: MockerFixture) -> None:
+    """Verify the process scan is skipped when skip_unless already says no."""
     # Given
     process_iter = mocker.patch("purger.registry.psutil.process_iter")
 
     # When
-    reason = skip_reason(make_plugin(is_available=lambda: False, busy_process=_is_tool))
+    reason = skip_reason(make_plugin(skip_unless=lambda: False, skip_while_running=_is_tool))
 
     # Then
     assert reason is SkipReason.UNAVAILABLE
@@ -374,7 +390,7 @@ def test_skip_reason_busy_process_after_is_available(mocker: MockerFixture) -> N
     [(False, None), (True, SkipReason.UNAVAILABLE)],
     ids=["process-exited", "ancestor-exited"],
 )
-def test_skip_reason_busy_process_lost_during_scan(
+def test_skip_reason_skip_while_running_lost_during_scan(
     still_running: bool, expected: SkipReason | None, mocker: MockerFixture
 ) -> None:
     """Verify a vanished match is ignored, but one whose ancestor vanished still counts."""
@@ -385,7 +401,7 @@ def test_skip_reason_busy_process_lost_during_scan(
     mocker.patch("purger.registry.psutil.process_iter", return_value=[process])
 
     # When
-    reason = skip_reason(make_plugin(busy_process=_is_tool))
+    reason = skip_reason(make_plugin(skip_while_running=_is_tool))
 
     # Then
     assert reason is expected
@@ -399,7 +415,7 @@ def test_process_table_scans_once_for_many_plugins(mocker: MockerFixture) -> Non
         return_value=[_process(mocker, cmdline=["other"], parent_pids=[1])],
     )
     table = ProcessTable()
-    plugins = [make_plugin(name=name, busy_process=_is_tool) for name in ("a", "b", "c")]
+    plugins = [make_plugin(name=name, skip_while_running=_is_tool) for name in ("a", "b", "c")]
 
     # When
     reasons = [skip_reason(plugin, processes=table) for plugin in plugins]
@@ -410,12 +426,12 @@ def test_process_table_scans_once_for_many_plugins(mocker: MockerFixture) -> Non
 
 
 @pytest.mark.parametrize(
-    ("busy_process", "expected"),
+    ("skip_while_running", "expected"),
     [(None, False), (_is_tool, True)],
     ids=["no-check", "tool-running"],
 )
 def test_is_busy(
-    busy_process: Callable[[list[str]], bool] | None, expected: bool, mocker: MockerFixture
+    skip_while_running: Callable[[list[str]], bool] | None, expected: bool, mocker: MockerFixture
 ) -> None:
     """Verify is_busy reports a running tool, and plugins without a check are never busy."""
     # Given
@@ -425,7 +441,7 @@ def test_is_busy(
     )
 
     # When / Then
-    assert is_busy(make_plugin(busy_process=busy_process)) is expected
+    assert is_busy(make_plugin(skip_while_running=skip_while_running)) is expected
 
 
 def test_is_busy_scan_fails(mocker: MockerFixture) -> None:
@@ -434,16 +450,96 @@ def test_is_busy_scan_fails(mocker: MockerFixture) -> None:
     mocker.patch("purger.registry.psutil.process_iter", side_effect=psutil.AccessDenied())
 
     # When / Then
-    assert is_busy(make_plugin(busy_process=_is_tool)) is True
+    assert is_busy(make_plugin(skip_while_running=_is_tool)) is True
 
 
-def test_skip_reason_busy_process_scan_fails(mocker: MockerFixture) -> None:
+def test_skip_reason_skip_while_running_scan_fails(mocker: MockerFixture) -> None:
     """Verify a process scan that fails counts as UNAVAILABLE rather than aborting the run."""
     # Given
     mocker.patch("purger.registry.psutil.process_iter", side_effect=psutil.AccessDenied())
 
     # When
-    reason = skip_reason(make_plugin(busy_process=_is_tool))
+    reason = skip_reason(make_plugin(skip_while_running=_is_tool))
 
     # Then
     assert reason is SkipReason.UNAVAILABLE
+
+
+def test_skip_reason_reads_new_gating_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify skip_reason reads operating_systems, requires_on_path, and skip_unless."""
+    # Given
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    # Then
+    assert (
+        skip_reason(make_plugin(requires_on_path="no-such-tool-purger"))
+        is SkipReason.MISSING_BINARY
+    )
+    assert skip_reason(make_plugin(skip_unless=lambda: False)) is SkipReason.UNAVAILABLE
+    assert (
+        skip_reason(make_plugin(operating_systems=(OperatingSystem.MACOS,))) is SkipReason.PLATFORM
+    )
+
+
+def _configured_plugin(**overrides: object) -> Plugin:
+    required = Setting(
+        name="paths", value_type=list[str], default=(), description="d", required=True
+    )
+    return make_plugin(settings=(required,), **overrides)
+
+
+def test_is_configured_false_for_empty_required_setting() -> None:
+    """Verify an empty required setting means not configured and a filled one passes."""
+    # Given
+    plugin = _configured_plugin()
+
+    # Then
+    assert not is_configured(plugin, PluginSettings(plugin="p", values={"paths": ()}))
+    assert is_configured(plugin, PluginSettings(plugin="p", values={"paths": ("/a",)}))
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+def test_is_configured_false_for_blank_required_string(blank: str) -> None:
+    """Verify a required string that is empty or only whitespace counts as unset."""
+    # Given a required string setting
+    required = Setting(name="token", value_type=str, default="", description="d", required=True)
+    plugin = make_plugin(settings=(required,))
+
+    # Then
+    assert not is_configured(plugin, PluginSettings(plugin="p", values={"token": blank}))
+    assert is_configured(plugin, PluginSettings(plugin="p", values={"token": "abc"}))
+
+
+def test_is_configured_uses_skip_unless_configured() -> None:
+    """Verify skip_unless_configured decides when no required setting is empty, and receives the settings."""
+    # Given
+    plugin = make_plugin(
+        settings=(Setting(name="mode", value_type=str, default="", description="d"),),
+        skip_unless_configured=lambda settings: settings.get_string("mode") == "on",
+    )
+
+    # Then
+    assert is_configured(plugin, PluginSettings(plugin="p", values={"mode": "on"}))
+    assert not is_configured(plugin, PluginSettings(plugin="p", values={"mode": "off"}))
+    assert is_configured(make_plugin(), PluginSettings(plugin="p", values={}))
+
+
+def test_is_configured_false_when_skip_unless_configured_raises(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Verify a raising skip_unless_configured counts as not configured and logs a warning."""
+
+    # Given
+    def boom(_: PluginSettings) -> bool:
+        msg = "broken"
+        raise RuntimeError(msg)
+
+    # When
+    result = is_configured(
+        make_plugin(skip_unless_configured=boom), PluginSettings(plugin="p", values={})
+    )
+
+    # Then
+    assert result is False
+    assert "broken" in caplog.text
+    assert [record.levelno for record in caplog.records] == [logging.WARNING]

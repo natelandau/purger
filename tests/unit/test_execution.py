@@ -5,19 +5,24 @@ from pathlib import Path
 from pytest_mock import MockerFixture
 
 from purger.execution import execute, mark_unfinished, record_freed
-from purger.plugin import Plugin
+from purger.plugin import (
+    Plugin,
+    PluginSettings,
+    RunCommand,
+)
 from purger.reports import ActionReport, PluginReport, Status
-from purger.sizing import PreparedPaths
-from tests.conftest import make_action, make_plugin
+from tests.conftest import EMPTY_SETTINGS, make_action, make_plugin
 
 
-def _plugin_report(name: str, *action_names: str, footprint: int | None = 100) -> PluginReport:
+def _plugin_report(name: str, *action_names: str, total_size: int | None = 100) -> PluginReport:
     actions = [
         ActionReport(action=make_action(name=action), size_bytes=10, resolved_paths=[])
         for action in action_names
     ]
     plugin = make_plugin(name=name, actions=tuple(r.action for r in actions))
-    return PluginReport(plugin=plugin, footprint_bytes=footprint, actions=actions)
+    return PluginReport(
+        settings=EMPTY_SETTINGS, plugin=plugin, total_size_bytes=total_size, actions=actions
+    )
 
 
 def _mark_done(report: ActionReport, *, home: Path, verbose: bool, interactive: bool) -> None:
@@ -64,10 +69,11 @@ def test_execute_interrupt_fails_current_and_skips_rest(mocker: MockerFixture) -
 def test_execute_announces_sudo(mocker: MockerFixture) -> None:
     """Verify a sudo action is announced as a warning before it runs."""
     # Given
-    action = make_action(name="rooty", command=("tool",), needs_sudo=True)
+    action = make_action(name="rooty", cleanup=RunCommand("tool", with_sudo=True))
     report = PluginReport(
+        settings=EMPTY_SETTINGS,
         plugin=make_plugin(name="one", actions=(action,)),
-        footprint_bytes=1,
+        total_size_bytes=1,
         actions=[ActionReport(action=action, size_bytes=1, resolved_paths=[])],
     )
     mocker.patch("purger.execution.run_action", autospec=True, side_effect=_mark_done)
@@ -97,14 +103,14 @@ def test_mark_unfinished_leaves_finished_actions() -> None:
 def test_record_freed_sets_difference_and_clamps(mocker: MockerFixture) -> None:
     """Verify freed bytes are before minus after, never negative, and None when unknown."""
     # Given three plugins: shrank, grew, and unknown afterwards
-    shrank = _plugin_report("shrank", "a", footprint=100)
-    grew = _plugin_report("grew", "a", footprint=100)
-    unknown = _plugin_report("unknown", "a", footprint=100)
+    shrank = _plugin_report("shrank", "a", total_size=100)
+    grew = _plugin_report("grew", "a", total_size=100)
+    unknown = _plugin_report("unknown", "a", total_size=100)
     after = {"shrank": 40, "grew": 150, "unknown": None}
     mocker.patch(
-        "purger.execution.measure_footprint",
+        "purger.execution.measure_total_size",
         autospec=True,
-        side_effect=lambda plugin, *, include_dangerous, prepared_paths: after[plugin.name],
+        side_effect=lambda plugin, *, include_dangerous, settings: after[plugin.name],
     )
 
     # When
@@ -120,7 +126,9 @@ def test_record_freed_interrupt_clears_freed(mocker: MockerFixture) -> None:
     """Verify Ctrl-C while re-measuring reports no freed space and returns True."""
     # Given
     report = _plugin_report("one", "a")
-    mocker.patch("purger.execution.measure_footprint", autospec=True, side_effect=KeyboardInterrupt)
+    mocker.patch(
+        "purger.execution.measure_total_size", autospec=True, side_effect=KeyboardInterrupt
+    )
 
     # When
     interrupted = record_freed([report], dangerous=True, show_progress=False)
@@ -134,15 +142,15 @@ def test_record_freed_interrupt_clears_freed(mocker: MockerFixture) -> None:
 def test_record_freed_interrupt_clears_sizes_already_measured(mocker: MockerFixture) -> None:
     """Verify Ctrl-C clears after sizes recorded before the interrupt, so no half result shows."""
     # Given one plugin measured before the interrupt
-    first = _plugin_report("first", "a", footprint=100)
-    second = _plugin_report("second", "a", footprint=100)
+    first = _plugin_report("first", "a", total_size=100)
+    second = _plugin_report("second", "a", total_size=100)
 
-    def measure(plugin: Plugin, *, include_dangerous: bool, prepared_paths: PreparedPaths) -> int:
+    def measure(plugin: Plugin, *, include_dangerous: bool, settings: PluginSettings) -> int:
         if plugin.name == "second":
             raise KeyboardInterrupt
         return 40
 
-    mocker.patch("purger.execution.measure_footprint", autospec=True, side_effect=measure)
+    mocker.patch("purger.execution.measure_total_size", autospec=True, side_effect=measure)
 
     # When
     interrupted = record_freed([first, second], dangerous=False, show_progress=False)
@@ -153,26 +161,24 @@ def test_record_freed_interrupt_clears_sizes_already_measured(mocker: MockerFixt
     assert [r.freed_bytes for r in (first, second)] == [None, None]
 
 
-def test_record_freed_remeasures_each_plugins_prepared_paths(mocker: MockerFixture) -> None:
-    """Verify re-measuring hands each plugin the prepared paths from its first measurement."""
+def test_record_freed_remeasures_with_each_plugins_settings(mocker: MockerFixture) -> None:
+    """Verify re-measuring hands each plugin the settings from its first measurement."""
     # Given
-    report = _plugin_report("one", "a", footprint=100)
-    report.prepared_paths = {"a": (Path("/kept"),)}
-    measure = mocker.patch("purger.execution.measure_footprint", autospec=True, return_value=40)
+    report = _plugin_report("one", "a", total_size=100)
+    report.settings = PluginSettings(plugin="one", values={"depth": 3})
+    measure = mocker.patch("purger.execution.measure_total_size", autospec=True, return_value=40)
 
     # When
     record_freed([report], dangerous=True, show_progress=False)
 
     # Then
-    measure.assert_called_once_with(
-        report.plugin, include_dangerous=True, prepared_paths={"a": (Path("/kept"),)}
-    )
+    measure.assert_called_once_with(report.plugin, include_dangerous=True, settings=report.settings)
 
 
 def test_record_freed_nothing_ran_measures_nothing(mocker: MockerFixture) -> None:
     """Verify no measurement happens when no plugin ran."""
     # Given
-    measure = mocker.patch("purger.execution.measure_footprint", autospec=True)
+    measure = mocker.patch("purger.execution.measure_total_size", autospec=True)
 
     # When
     interrupted = record_freed([], dangerous=False, show_progress=True)

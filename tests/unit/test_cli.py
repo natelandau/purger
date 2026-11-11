@@ -11,11 +11,22 @@ from pytest_mock import MockerFixture, MockType
 
 from purger import cli
 from purger.cli import ExitCode, app, confirm, main
-from purger.config import Config, PluginSettings
+from purger.config import Config
 from purger.measure_display import MeasureDisplay
-from purger.plugin import Detail, Plugin, Setting, Tier
+from purger.plugin import (
+    Action,
+    DeletePaths,
+    OperatingSystem,
+    Plugin,
+    PluginSettings,
+    RiskLevel,
+    RunCommand,
+    Setting,
+    SizeBreakdownRow,
+    once_per_run,
+)
 from purger.reports import ActionReport, PluginReport, SkippedPlugin, SkipReason, Status
-from tests.conftest import make_action, make_plugin, table_row
+from tests.conftest import EMPTY_SETTINGS, make_action, make_plugin, table_row
 
 _SIZE = 100
 
@@ -33,17 +44,22 @@ def _fake_measure(
             size_bytes=_SIZE,
             resolved_paths=(
                 [Path(f"/fake/{action.name}/{i}") for i in range(3)]
-                if action.command is None
+                if isinstance(action.cleanup, DeletePaths)
                 else []
             ),
-            details=[Detail(label=f"row-of-{action.name}", size_bytes=_SIZE)]
+            details=[SizeBreakdownRow(label=f"row-of-{action.name}", size_bytes=_SIZE)]
             if with_details
             else [],
         )
         for action in plugin.actions
-        if include_dangerous or action.tier is not Tier.DANGEROUS
+        if include_dangerous or action.risk_level is not RiskLevel.DANGEROUS
     ]
-    return PluginReport(plugin=plugin, footprint_bytes=_SIZE * len(actions), actions=actions)
+    return PluginReport(
+        settings=EMPTY_SETTINGS,
+        plugin=plugin,
+        total_size_bytes=_SIZE * len(actions),
+        actions=actions,
+    )
 
 
 def _mark_done(report: ActionReport, *, home: object, verbose: bool, interactive: bool) -> None:
@@ -54,14 +70,10 @@ def _patch_measure(mocker: MockerFixture, *, side_effect: object) -> MockType:
     """Patch measuring in the CLI and re-measuring in execution with one shared mock."""
     measure = mocker.patch("purger.cli.measure_plugin", autospec=True, side_effect=side_effect)
     mocker.patch(
-        "purger.execution.measure_footprint",
+        "purger.execution.measure_total_size",
         autospec=True,
-        side_effect=lambda plugin, *, include_dangerous, prepared_paths: (
-            measure(
-                plugin,
-                include_dangerous=include_dangerous,
-                settings=Config().settings_for(plugin),
-            ).footprint_bytes
+        side_effect=lambda plugin, *, include_dangerous, settings: (
+            measure(plugin, include_dangerous=include_dangerous, settings=settings).total_size_bytes
         ),
     )
     return measure
@@ -170,7 +182,7 @@ def test_named_unavailable_plugin_warns(
     """Verify naming a plugin for another platform warns with the current platform and exits 0."""
     # Given
     monkeypatch.setattr(sys, "platform", "linux")
-    patch_registry(make_plugin(name="macish", platforms=frozenset({"darwin"})))
+    patch_registry(make_plugin(name="macish", operating_systems=(OperatingSystem.MACOS,)))
 
     # When
     code = _run("info", "macish", "--json")
@@ -232,9 +244,9 @@ def test_clean_json_never_runs_risky(
         make_plugin(
             name="alpha",
             actions=(
-                make_action(name="safe-one", tier=Tier.SAFE),
-                make_action(name="risky", tier=Tier.CAUTION),
-                make_action(name="wipe", tier=Tier.DANGEROUS),
+                make_action(name="safe-one", risk_level=RiskLevel.SAFE),
+                make_action(name="risky", risk_level=RiskLevel.CAUTION),
+                make_action(name="wipe", risk_level=RiskLevel.DANGEROUS),
             ),
         )
     )
@@ -340,8 +352,10 @@ def test_clean_dry_run_executes_nothing(
         make_plugin(
             name="alpha",
             actions=(
-                make_action(name="prune", command=("tool", "prune")),
-                make_action(name="risky", tier=Tier.CAUTION, command=("tool", "nuke")),
+                make_action(name="prune", cleanup=RunCommand("tool", "prune")),
+                make_action(
+                    name="risky", risk_level=RiskLevel.CAUTION, cleanup=RunCommand("tool", "nuke")
+                ),
             ),
         )
     )
@@ -391,8 +405,8 @@ def test_clean_interactive_yes_still_confirms_caution_and_notes_sudo(
         make_plugin(
             name="alpha",
             actions=(
-                make_action(name="sudo-safe", command=("tool", "x"), needs_sudo=True),
-                make_action(name="risky", tier=Tier.CAUTION),
+                make_action(name="sudo-safe", cleanup=RunCommand("tool", "x", with_sudo=True)),
+                make_action(name="risky", risk_level=RiskLevel.CAUTION),
             ),
         )
     )
@@ -518,7 +532,7 @@ def test_clean_human_prints_results_table(
     plugin = make_plugin(name="alpha")
     mocker.patch("purger.cli.discover_plugins", autospec=True, return_value={plugin.name: plugin})
     before = _fake_measure(plugin, include_dangerous=False, settings=Config().settings_for(plugin))
-    after = PluginReport(plugin=plugin, footprint_bytes=40, actions=[])
+    after = PluginReport(settings=EMPTY_SETTINGS, plugin=plugin, total_size_bytes=40, actions=[])
     _patch_measure(mocker, side_effect=[before, after])
     mocker.patch("purger.execution.run_action", autospec=True, side_effect=_mark_done)
 
@@ -545,7 +559,7 @@ def test_clean_human_lists_failures_under_table(
     plugin = make_plugin(name="alpha", actions=(make_action(name="one"), make_action(name="two")))
     mocker.patch("purger.cli.discover_plugins", autospec=True, return_value={plugin.name: plugin})
     before = _fake_measure(plugin, include_dangerous=False, settings=Config().settings_for(plugin))
-    after = PluginReport(plugin=plugin, footprint_bytes=50, actions=[])
+    after = PluginReport(settings=EMPTY_SETTINGS, plugin=plugin, total_size_bytes=50, actions=[])
     _patch_measure(mocker, side_effect=[before, after])
 
     def run(report: ActionReport, *, home: object, verbose: bool, interactive: bool) -> None:
@@ -588,7 +602,7 @@ def test_clean_json_stdout_is_only_the_document(
             name="alpha",
             actions=(
                 make_action(name="plain"),
-                make_action(name="rooty", command=("tool", "x"), needs_sudo=True),
+                make_action(name="rooty", cleanup=RunCommand("tool", "x", with_sudo=True)),
             ),
         )
     )
@@ -684,7 +698,9 @@ def test_clean_interactive_caution_yes_runs_it(
     """Verify answering Yes to a CAUTION prompt runs that action interactively."""
     # Given
     patch_registry(
-        make_plugin(name="alpha", actions=(make_action(name="risky", tier=Tier.CAUTION),))
+        make_plugin(
+            name="alpha", actions=(make_action(name="risky", risk_level=RiskLevel.CAUTION),)
+        )
     )
     mocker.patch.object(cli.sys.stdin, "isatty", return_value=True)
     mocker.patch("purger.cli.choose_one_from_list", autospec=True, return_value="yes")
@@ -711,7 +727,7 @@ def test_clean_non_interactive_warns_about_declined(
             name="alpha",
             actions=(
                 make_action(name="safe-one"),
-                make_action(name="risky", tier=Tier.CAUTION),
+                make_action(name="risky", risk_level=RiskLevel.CAUTION),
             ),
         )
     )
@@ -955,7 +971,9 @@ def test_measure_hands_each_plugin_its_configured_settings(mocker: MockerFixture
     mocker.patch("purger.cli.skip_reason", autospec=True, return_value=None)
     plugin = make_plugin(
         name="alpha",
-        settings=(Setting(name="depth", kind="int", default=3, help="How deep to look."),),
+        settings=(
+            Setting(name="depth", value_type=int, default=3, description="How deep to look."),
+        ),
     )
     config = Config(values={"alpha": {"depth": 8}})
 
@@ -965,17 +983,13 @@ def test_measure_hands_each_plugin_its_configured_settings(mocker: MockerFixture
     # Then
     settings = measure.call_args.kwargs["settings"]
     assert settings == config.settings_for(plugin)
-    assert settings.integer("depth") == 8
+    assert settings.get_integer("depth") == 8
 
 
-def test_measure_skips_a_plugin_whose_prepare_reports_not_configured() -> None:
-    """Verify a prepare hook returning None skips the plugin as not configured."""
+def test_measure_skips_a_plugin_whose_configuration_check_fails() -> None:
+    """Verify a configuration check returning False skips the plugin as not configured."""
     # Given
-    plugin = make_plugin(
-        name="alpha",
-        prepare=lambda _: None,
-        actions=(make_action(command=None, prepared=True),),
-    )
+    plugin = make_plugin(name="alpha", skip_unless_configured=lambda _: False)
 
     # When
     scan = cli._measure([plugin], dangerous=False, display=None, config=Config())
@@ -985,19 +999,17 @@ def test_measure_skips_a_plugin_whose_prepare_reports_not_configured() -> None:
     assert scan.skipped == [SkippedPlugin(name="alpha", reason=SkipReason.NOT_CONFIGURED)]
 
 
-def test_measure_does_not_prepare_a_plugin_that_is_unavailable() -> None:
-    """Verify an unavailable plugin is skipped before its prepare hook runs."""
+def test_measure_does_not_check_configuration_of_a_plugin_that_is_unavailable() -> None:
+    """Verify an unavailable plugin is skipped before its configuration check runs."""
     # Given
     calls: list[str] = []
 
-    def prepare(_: PluginSettings) -> None:
-        calls.append("prepare")
+    def is_configured(_: PluginSettings) -> bool:
+        calls.append("is_configured")
+        return False
 
     plugin = make_plugin(
-        name="alpha",
-        is_available=lambda: False,
-        prepare=prepare,
-        actions=(make_action(command=None, prepared=True),),
+        name="alpha", skip_unless=lambda: False, skip_unless_configured=is_configured
     )
 
     # When
@@ -1008,7 +1020,7 @@ def test_measure_does_not_prepare_a_plugin_that_is_unavailable() -> None:
     assert calls == []
 
 
-def test_info_verbose_prints_detail_rows(
+def test_info_verbose_prints_size_breakdown_rows(
     patch_registry: Callable[..., None], capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Verify info -v breaks each plugin down into its rows."""
@@ -1023,10 +1035,10 @@ def test_info_verbose_prints_detail_rows(
     assert "row-of-prune" in capsys.readouterr().out
 
 
-def test_info_without_verbose_skips_detail_measurement(
+def test_info_without_verbose_skips_size_breakdown_measurement(
     patch_registry: Callable[..., None], mocker: MockerFixture
 ) -> None:
-    """Verify a plain info does no detail work."""
+    """Verify a plain info builds no size breakdown rows."""
     # Given
     plugin = make_plugin(name="alpha")
     mocker.patch("purger.cli.discover_plugins", autospec=True, return_value={"alpha": plugin})
@@ -1045,7 +1057,7 @@ def test_clean_dry_run_prints_one_summary_line_per_action(
     """Verify the dry run sums up a path action instead of listing every path."""
     # Given a path action that resolves three paths
     patch_registry(
-        make_plugin(name="alpha", actions=(make_action(name="files", command=None, paths=("/x",)),))
+        make_plugin(name="alpha", actions=(make_action(name="files", cleanup=DeletePaths("/x")),))
     )
 
     # When
@@ -1065,7 +1077,7 @@ def test_clean_dry_run_verbose_lists_rows(
     """Verify the dry run with -v shows each action's rows."""
     # Given
     patch_registry(
-        make_plugin(name="alpha", actions=(make_action(name="files", command=None, paths=("/x",)),))
+        make_plugin(name="alpha", actions=(make_action(name="files", cleanup=DeletePaths("/x")),))
     )
 
     # When
@@ -1091,7 +1103,7 @@ def test_clean_short_n_is_dry_run(
     run_action.assert_not_called()
 
 
-def test_clean_verbose_shows_detail_before_prompts(
+def test_clean_verbose_shows_size_breakdown_before_prompts(
     patch_registry: Callable[..., None],
     mocker: MockerFixture,
     capsys: pytest.CaptureFixture[str],
@@ -1119,7 +1131,7 @@ def test_clean_verbose_shows_detail_before_prompts(
 def test_info_json_includes_details_without_verbose(
     patch_registry: Callable[..., None], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Verify agents get detail rows without passing -v."""
+    """Verify agents get size breakdown rows without passing -v."""
     # Given
     patch_registry(make_plugin(name="alpha", actions=(make_action(name="prune"),)))
 
@@ -1149,11 +1161,13 @@ def test_clean_verbose_skips_rows_of_actions_with_nothing_to_clean(
                 action=action,
                 size_bytes=0 if action.name == "empty" else _SIZE,
                 resolved_paths=[],
-                details=[Detail(label=f"row-of-{action.name}", size_bytes=0)],
+                details=[SizeBreakdownRow(label=f"row-of-{action.name}", size_bytes=0)],
             )
             for action in plugin.actions
         ]
-        return PluginReport(plugin=plugin, footprint_bytes=_SIZE, actions=actions)
+        return PluginReport(
+            settings=EMPTY_SETTINGS, plugin=plugin, total_size_bytes=_SIZE, actions=actions
+        )
 
     _patch_measure(mocker, side_effect=measure)
     mocker.patch.object(cli.sys.stdin, "isatty", return_value=True)
@@ -1190,3 +1204,85 @@ def test_verbose_replaces_table_with_sections(
     assert "alpha tool" in out
     assert "row-of-prune" in out
     assert "Total" in out
+
+
+def test_required_setting_set_empty_by_environment_is_not_configured(
+    patch_registry: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify an empty environment value for a required setting skips the plugin."""
+    # Given
+    setting = Setting(
+        name="paths",
+        value_type=list[str],
+        default=["/somewhere"],
+        description="Folders.",
+        required=True,
+    )
+    patch_registry(make_plugin(name="a", settings=(setting,)))
+    monkeypatch.setenv("PURGER_A__PATHS", "")
+
+    # When
+    code = _run("info", "--json")
+
+    # Then
+    doc = _json(capsys)
+    assert code == ExitCode.OK
+    assert doc["plugins"] == []
+    assert {"name": "a", "reason": "not_configured"} in doc["skipped"]
+
+
+def test_unavailable_plugin_is_not_reported_as_not_configured(
+    patch_registry: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify availability is checked before configuration."""
+    # Given
+    setting = Setting(
+        name="paths", value_type=list[str], default=(), description="Folders.", required=True
+    )
+    patch_registry(make_plugin(name="a", settings=(setting,), skip_unless=lambda: False))
+
+    # When
+    code = _run("info", "--json")
+
+    # Then
+    doc = _json(capsys)
+    assert code == ExitCode.OK
+    assert {"name": "a", "reason": "unavailable"} in doc["skipped"]
+
+
+def test_each_command_starts_with_fresh_run_caches(
+    mocker: MockerFixture, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Verify a second command in one process scans again instead of reusing the first scan."""
+    # Given a plugin whose only action reads a counting once_per_run scan
+    calls: list[PluginSettings] = []
+
+    @once_per_run
+    def scan(settings: PluginSettings) -> list[Path]:
+        calls.append(settings)
+        return []
+
+    plugin = make_plugin(
+        name="alpha",
+        actions=(
+            Action(
+                name="found",
+                risk_level=RiskLevel.SAFE,
+                description="Remove found things.",
+                cleanup=DeletePaths(found_by=scan),
+            ),
+        ),
+    )
+    mocker.patch("purger.cli.discover_plugins", autospec=True, return_value={"alpha": plugin})
+
+    # When
+    _run("info", "--json")
+    _run("info", "--json")
+    capsys.readouterr()
+
+    # Then
+    assert len(calls) == 2

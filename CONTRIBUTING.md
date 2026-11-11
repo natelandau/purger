@@ -82,12 +82,12 @@ To add a plugin, do these steps:
 1. Copy `_template.py` to a file named after the plugin, with underscores for hyphens (`pre_commit.py` for `pre-commit`).
 2. Replace the module docstring with one line that names the tool.
 3. Change the plugin fields and the actions to match the tool. Delete each field and action that the tool does not need.
-4. If the plugin has two or more command actions, give the plugin its own `size`, `size_cmd`, or `paths`. Their sizes can overlap, so purger cannot add them together. The exception is a plugin where each command action measures exactly what it frees, such as `go`.
+4. If the plugin has two or more command actions and any of them has `size=SizeUnknown(...)`, give the plugin a `total_size`. Their sizes can overlap, so purger cannot add them together.
 5. In `tests/plugins/test_definitions.py`, add the plugin name to `test_discover_plugins_finds_builtin_set` and add each action to `_EXPECTED_ACTIONS`.
 6. Put the plugin's own tests in a new file, `tests/plugins/test_<module>.py`. Mock each tool command. A test that runs a real tool command fails.
 7. Run `uv run purger info` and `uv run purger --help` to make sure that the plugin appears.
 
-A plugin must not delete anything that the user cannot rebuild, unless the action has the `dangerous` tier. A path action can delete only below your home directory. purger refuses every other path.
+A plugin must not delete anything that the user cannot rebuild, unless the action has the `dangerous` risk level. A path action can delete only below your home directory. purger refuses every other path.
 
 If you add a field to `Plugin` or `Action`, document the field in `_template.py`.
 

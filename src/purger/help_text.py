@@ -156,7 +156,7 @@ running has `error` set to `busy`. `failed` includes an action stopped by Ctrl-C
 
 
 def _platforms(plugin: Plugin) -> str:
-    return ", ".join(sorted(plugin.platforms))
+    return ", ".join(sorted(system.value for system in plugin.operating_systems))
 
 
 def plugin_catalog(plugins: Iterable[Plugin]) -> str:

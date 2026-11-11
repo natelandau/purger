@@ -11,9 +11,10 @@ from nclutils.sh import (
 )
 from pytest_mock import MockerFixture
 
+from purger.plugin import DeletePaths, RunCommand
 from purger.reports import ActionReport, Status
-from purger.runner import _describe_failure, run_action, sudo_ready
-from tests.conftest import make_action
+from purger.runner import _describe_failure, probe_output, run_action, sudo_ready
+from tests.conftest import make_action, make_completed
 
 
 def _report(resolved: list[Path] | None = None, **action_overrides: object) -> ActionReport:
@@ -26,7 +27,7 @@ def test_run_action_command_runs_tool(mocker: MockerFixture) -> None:
     """Verify a command action runs the tool command and is marked done."""
     # Given
     run_command = mocker.patch("purger.runner.run_command", autospec=True)
-    report = _report(command=("uv", "cache", "prune"))
+    report = _report(cleanup=RunCommand("uv", "cache", "prune"))
 
     # When
     run_action(report, home=Path("/unused"), verbose=False, interactive=True)
@@ -42,7 +43,7 @@ def test_run_action_sudo_uses_run_interactive(mocker: MockerFixture) -> None:
     # Given
     run_command = mocker.patch("purger.runner.run_command", autospec=True)
     run_interactive = mocker.patch("purger.runner.run_interactive", autospec=True)
-    report = _report(command=("apt", "clean"), needs_sudo=True)
+    report = _report(cleanup=RunCommand("apt", "clean", with_sudo=True))
 
     # When
     run_action(report, home=Path("/unused"), verbose=False, interactive=True)
@@ -58,7 +59,7 @@ def test_run_action_sudo_non_interactive_never_prompts(mocker: MockerFixture) ->
     # Given
     run_command = mocker.patch("purger.runner.run_command", autospec=True)
     run_interactive = mocker.patch("purger.runner.run_interactive", autospec=True)
-    report = _report(command=("apt", "clean"), needs_sudo=True)
+    report = _report(cleanup=RunCommand("apt", "clean", with_sudo=True))
 
     # When
     run_action(report, home=Path("/unused"), verbose=True, interactive=False)
@@ -75,7 +76,7 @@ def test_run_action_command_failure_is_reported(mocker: MockerFixture) -> None:
     mocker.patch(
         "purger.runner.run_command", autospec=True, side_effect=ShellCommandFailedError(msg="boom")
     )
-    report = _report(command=("false",))
+    report = _report(cleanup=RunCommand("false"))
 
     # When
     run_action(report, home=Path("/unused"), verbose=False, interactive=True)
@@ -90,7 +91,7 @@ def test_run_action_keyboard_interrupt_propagates(mocker: MockerFixture) -> None
     """Verify KeyboardInterrupt is not swallowed by the runner."""
     # Given
     mocker.patch("purger.runner.run_command", autospec=True, side_effect=KeyboardInterrupt)
-    report = _report(command=("sleep", "9"))
+    report = _report(cleanup=RunCommand("sleep", "9"))
 
     # When / Then
     with pytest.raises(KeyboardInterrupt):
@@ -107,7 +108,7 @@ def test_run_action_path_deletes_matches(tmp_path: Path) -> None:
         target.mkdir(parents=True)
         (target / "file").write_text("x")
         paths.append(target)
-    report = _report(paths, command=None, paths=("~/Library/Caches/*",))
+    report = _report(paths, cleanup=DeletePaths("~/Library/Caches/*"))
 
     # When
     run_action(report, home=home, verbose=False, interactive=True)
@@ -126,7 +127,7 @@ def test_run_action_path_guard_violation_fails_action(tmp_path: Path) -> None:
     (bad / "file").write_text("x")
     good = home / "Library" / "Caches" / "x"
     good.mkdir(parents=True)
-    report = _report([bad, good], command=None, paths=("~/Documents",))
+    report = _report([bad, good], cleanup=DeletePaths("~/Documents"))
 
     # When
     run_action(report, home=home, verbose=False, interactive=True)
@@ -145,7 +146,7 @@ def test_run_action_path_os_error_fails_action(mocker: MockerFixture, tmp_path: 
     home = tmp_path / "Users" / "me"
     target = home / "Library" / "Caches" / "x"
     mocker.patch("purger.runner.delete_path", autospec=True, side_effect=PermissionError("denied"))
-    report = _report([target], command=None, paths=("~/Library/Caches/x",))
+    report = _report([target], cleanup=DeletePaths("~/Library/Caches/x"))
 
     # When
     run_action(report, home=home, verbose=False, interactive=True)
@@ -167,7 +168,7 @@ def test_run_action_continues_past_filesystem_errors(tmp_path: Path) -> None:
         (folder / "f.pyc").parent.mkdir(parents=True)
         (folder / "f.pyc").write_text("x")
     stuck.chmod(0o500)
-    report = _report([first, stuck, last], command=None, paths=("~/repos/proj/*",))
+    report = _report([first, stuck, last], cleanup=DeletePaths("~/repos/proj/*"))
 
     # When
     try:
@@ -235,7 +236,7 @@ def test_run_action_undecodable_output_fails_action(mocker: MockerFixture) -> No
         autospec=True,
         side_effect=UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
     )
-    report = _report(command=("tool",))
+    report = _report(cleanup=RunCommand("tool"))
 
     # When
     run_action(report, home=Path("/unused"), verbose=False, interactive=True)
@@ -255,7 +256,7 @@ def test_run_action_symlinked_parent_fails_action(tmp_path: Path) -> None:
     (home / "Library").mkdir()
     (home / "Library" / "Caches").symlink_to(home / "Documents")
     match = home / "Library" / "Caches" / "Project"
-    report = _report([match], command=None, paths=("~/Library/Caches/*",))
+    report = _report([match], cleanup=DeletePaths("~/Library/Caches/*"))
 
     # When
     run_action(report, home=home, verbose=False, interactive=True)
@@ -271,7 +272,7 @@ def test_run_action_verbose_streams(mocker: MockerFixture) -> None:
     """Verify verbose mode streams a plain command's output."""
     # Given
     run_command = mocker.patch("purger.runner.run_command", autospec=True)
-    report = _report(command=("uv", "cache", "prune"))
+    report = _report(cleanup=RunCommand("uv", "cache", "prune"))
 
     # When
     run_action(report, home=Path("/unused"), verbose=True, interactive=True)
@@ -288,7 +289,7 @@ def test_run_action_interactive_sudo_failure_is_reported(mocker: MockerFixture) 
         autospec=True,
         side_effect=ShellCommandFailedError(msg="sudo: 3 incorrect password attempts"),
     )
-    report = _report(command=("apt-get", "clean"), needs_sudo=True)
+    report = _report(cleanup=RunCommand("apt-get", "clean", with_sudo=True))
 
     # When
     run_action(report, home=Path("/unused"), verbose=False, interactive=True)
@@ -352,7 +353,7 @@ def test_describe_leads_with_explain_hint() -> None:
 
 @pytest.mark.parametrize("stderr", ["", "   "])
 def test_describe_skips_explain_without_stderr(stderr: str) -> None:
-    """Verify the hint hook is not called when the command printed no stderr."""
+    """Verify the explain_failure function is not called when the command printed no stderr."""
     # Given
     exc = ShellCommandFailedError(result=_completed(stderr=stderr), msg="boom")
 
@@ -367,7 +368,7 @@ def test_describe_skips_explain_without_stderr(stderr: str) -> None:
 
 
 def test_describe_keeps_message_when_explain_returns_none() -> None:
-    """Verify a hook with nothing to add leaves the message unchanged."""
+    """Verify an explain_failure function with nothing to add leaves the message unchanged."""
     # Given
     exc = ShellCommandFailedError(result=_completed(stderr="disk full"), msg="boom")
 
@@ -378,13 +379,13 @@ def test_describe_keeps_message_when_explain_returns_none() -> None:
     assert message == "boom: disk full"
 
 
-def test_describe_ignores_raising_explain_hook() -> None:
-    """Verify a hook that raises drops its hint and keeps the failure message."""
+def test_describe_ignores_raising_explain_function() -> None:
+    """Verify an explain_failure function that raises drops its hint and keeps the failure message."""
     # Given
     exc = ShellCommandFailedError(result=_completed(stderr="disk full"), msg="boom")
 
     def explain(_stderr: str) -> str:
-        msg = "broken hook"
+        msg = "broken explain function"
         raise RuntimeError(msg)
 
     # When
@@ -394,15 +395,15 @@ def test_describe_ignores_raising_explain_hook() -> None:
     assert message == "boom: disk full"
 
 
-def test_run_action_failure_uses_action_explain_hook(mocker: MockerFixture) -> None:
-    """Verify a failed command's report carries the hint from the action's hook."""
+def test_run_action_failure_uses_action_explain_failure(mocker: MockerFixture) -> None:
+    """Verify a failed command's report carries the hint from the action's explain_failure function."""
     # Given
     mocker.patch(
         "purger.runner.run_command",
         autospec=True,
         side_effect=ShellCommandFailedError(result=_completed(stderr="ENOTEMPTY")),
     )
-    report = _report(command=("tool",), explain_failure=lambda _stderr: "a hint")
+    report = _report(cleanup=RunCommand("tool"), explain_failure=lambda _stderr: "a hint")
 
     # When
     run_action(report, home=Path("/unused"), verbose=False, interactive=True)
@@ -424,3 +425,39 @@ def test_sudo_ready_false_on_timeout(mocker: MockerFixture) -> None:
 
     # When / Then
     assert sudo_ready() is False
+
+
+@pytest.mark.parametrize(
+    ("returncode", "expected"),
+    [(0, "/var/run/tool.sock\n"), (1, None)],
+)
+def test_probe_output_returns_stdout_only_on_success(
+    mocker: MockerFixture, returncode: int, expected: str | None
+) -> None:
+    """Verify a probe gives its stdout when it exits zero and no answer otherwise."""
+    # Given
+    run_command = mocker.patch(
+        "purger.runner.run_command",
+        autospec=True,
+        return_value=make_completed(returncode=returncode, stdout="/var/run/tool.sock\n"),
+    )
+
+    # When
+    output = probe_output(["tool", "where"], timeout=5)
+
+    # Then
+    assert output == expected
+    run_command.assert_called_once_with(["tool", "where"], check=False, timeout=5)
+
+
+def test_probe_output_none_when_command_cannot_run(mocker: MockerFixture) -> None:
+    """Verify a probe whose program is missing gives no answer instead of raising."""
+    # Given
+    mocker.patch(
+        "purger.runner.run_command",
+        autospec=True,
+        side_effect=ShellCommandNotFoundError(argv=["tool"]),
+    )
+
+    # When / Then
+    assert probe_output(["tool", "where"], timeout=5) is None

@@ -4,8 +4,7 @@ import logging
 from collections.abc import Iterable
 from pathlib import Path
 
-from purger.config import PluginSettings
-from purger.plugin import Action, Detail, PathSizes
+from purger.plugin import Action, PathSizes, PluginSettings, SizeBreakdownRow
 from purger.reports import sum_known
 from purger.safety import invoking_home
 
@@ -39,12 +38,12 @@ def largest_first(size: int | None, name: str) -> tuple[bool, int, str]:
     return (size is None, -(size or 0), name)
 
 
-def row_order(row: Detail) -> tuple[bool, int, str]:
+def row_order(row: SizeBreakdownRow) -> tuple[bool, int, str]:
     """Sort key putting the largest row first, unknown sizes last, and ties by label."""
     return largest_first(size=row.size_bytes, name=row.label)
 
 
-def default_details(sizes: PathSizes) -> list[Detail]:
+def default_details(sizes: PathSizes) -> list[SizeBreakdownRow]:
     """Describe an action without its own hook as one row per path.
 
     A row is labeled with the item's name and shows its folder as the item,
@@ -56,22 +55,24 @@ def default_details(sizes: PathSizes) -> list[Detail]:
         sizes: Each resolved path's measured size.
 
     Returns:
-        list[Detail]: One row per path, largest first.
+        list[SizeBreakdownRow]: One row per path, largest first.
     """
     rows = [
-        Detail(
+        SizeBreakdownRow(
             label=path.name or tilde(path),
             size_bytes=size,
-            items=(path.parent.name,) if path.parent.name else (),
+            item_names=(path.parent.name,) if path.parent.name else (),
             paths=(path,),
-            key=str(path),
+            merge_key=str(path),
         )
         for path, size in sizes.items()
     ]
     return sorted(rows, key=row_order)
 
 
-def action_details(action: Action, sizes: PathSizes, settings: PluginSettings) -> list[Detail]:
+def action_details(
+    action: Action, sizes: PathSizes, settings: PluginSettings
+) -> list[SizeBreakdownRow]:
     """Describe an action's size as rows, using its own hook when it has one.
 
     A hook is plugin-supplied code, so one that raises falls back to the
@@ -83,14 +84,14 @@ def action_details(action: Action, sizes: PathSizes, settings: PluginSettings) -
         settings: The plugin's settings for this run.
 
     Returns:
-        list[Detail]: The rows, largest first.
+        list[SizeBreakdownRow]: The rows, largest first.
     """
-    if action.details is None:
+    if action.size_breakdown is None:
         return default_details(sizes)
     try:
-        rows = list(action.details(sizes, settings))
-        if not all(isinstance(row, Detail) for row in rows):
-            msg = f"expected Detail rows, got {rows!r}"
+        rows = list(action.size_breakdown(sizes, settings))
+        if not all(isinstance(row, SizeBreakdownRow) for row in rows):
+            msg = f"expected SizeBreakdownRow rows, got {rows!r}"
             raise TypeError(msg)  # noqa: TRY301 - one fallback for every bad result
         return sorted(rows, key=row_order)
     except Exception as exc:  # noqa: BLE001 - plugin-supplied code can raise anything
@@ -98,27 +99,27 @@ def action_details(action: Action, sizes: PathSizes, settings: PluginSettings) -
         return default_details(sizes)
 
 
-def merge(rows: Iterable[Detail]) -> list[Detail]:
+def merge(rows: Iterable[SizeBreakdownRow]) -> list[SizeBreakdownRow]:
     """Combine rows that describe the same thing, such as one project's rows from two actions.
 
     Args:
         rows: Rows from any number of actions.
 
     Returns:
-        list[Detail]: One row per key, largest first.
+        list[SizeBreakdownRow]: One row per key, largest first.
     """
-    merged: dict[str, Detail] = {}
+    merged: dict[str, SizeBreakdownRow] = {}
     for row in rows:
-        key = row.key or row.label
+        key = row.merge_key or row.label
         first = merged.get(key)
         if first is None:
             merged[key] = row
             continue
-        merged[key] = Detail(
+        merged[key] = SizeBreakdownRow(
             label=first.label,
             size_bytes=sum_known([first.size_bytes, row.size_bytes]),
-            items=tuple(dict.fromkeys((*first.items, *row.items))),
+            item_names=tuple(dict.fromkeys((*first.item_names, *row.item_names))),
             paths=(*first.paths, *row.paths),
-            key=first.key,
+            merge_key=first.merge_key,
         )
     return sorted(merged.values(), key=row_order)

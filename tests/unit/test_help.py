@@ -8,8 +8,11 @@ import pytest
 from rich.console import Console
 
 from purger.cli import app, attach_plugin_catalog
-from purger.config import PluginSettings
 from purger.help_text import plugin_catalog
+from purger.plugin import (
+    OperatingSystem,
+    PluginSettings,
+)
 from purger.registry import discover_plugins
 from purger.reports import Status
 from tests.conftest import make_action, make_plugin
@@ -39,12 +42,12 @@ def test_help_lists_every_plugin_on_one_line(command: tuple[str, ...]) -> None:
     for plugin in plugins.values():
         assert any(f"{plugin.name}: {plugin.description}" in line for line in lines)
         for action in plugin.actions:
-            if action.help:
-                assert action.help not in text
+            if action.description:
+                assert action.description not in text
 
 
 def test_top_level_help_has_agent_notes() -> None:
-    """Verify top-level help explains tiers, JSON use, and the root refusal."""
+    """Verify top-level help explains risk levels, JSON use, and the root refusal."""
     # Given / When rendering help with the registered plugins
     text = _help()
 
@@ -82,8 +85,8 @@ def test_plugin_catalog_marks_unavailable(monkeypatch: pytest.MonkeyPatch) -> No
     linux_only = make_plugin(
         name="linux-only",
         description="Linux cache",
-        platforms=frozenset({"linux"}),
-        actions=(make_action(name="wipe", help="Wipe it"),),
+        operating_systems=(OperatingSystem.LINUX,),
+        actions=(make_action(name="wipe", description="Wipe it"),),
     )
     everywhere = make_plugin(name="everywhere", description="Everywhere cache")
 
@@ -99,15 +102,16 @@ def test_plugin_catalog_marks_unavailable(monkeypatch: pytest.MonkeyPatch) -> No
     assert "Wipe it" not in text
 
 
-def test_plugin_catalog_does_not_run_the_prepare_hook() -> None:
-    """Verify an unconfigured plugin is not marked unavailable in help and is never prepared."""
-    # Given a plugin whose prepare hook reports it not configured
+def test_plugin_catalog_does_not_run_the_configuration_check() -> None:
+    """Verify an unconfigured plugin is not marked unavailable in help and is never checked."""
+    # Given a plugin whose configuration check reports it not configured
     calls: list[str] = []
 
-    def prepare(_: PluginSettings) -> None:
-        calls.append("prepare")
+    def is_configured(_: PluginSettings) -> bool:
+        calls.append("is_configured")
+        return False
 
-    unconfigured = make_plugin(name="unconfigured", prepare=prepare)
+    unconfigured = make_plugin(name="unconfigured", skip_unless_configured=is_configured)
 
     # When
     text = plugin_catalog([unconfigured])

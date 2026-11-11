@@ -16,9 +16,21 @@ from rich.table import Table
 from rich.text import Text
 
 import purger
-from purger.plugin import Action, Plugin, Tier
+from purger.plugin import (
+    Action,
+    DeletePaths,
+    Plugin,
+    PluginSettings,
+    RiskLevel,
+    RunCommand,
+    SizeUnknown,
+    reset_run_caches,
+)
 
 _SPAWNERS = ("run_command", "run_interactive")
+
+# Settings for a report built by hand, where no setting is read.
+EMPTY_SETTINGS = PluginSettings(plugin="p", values={})
 _HARMLESS = frozenset({"echo", "true", "false"})
 
 
@@ -75,6 +87,12 @@ def _isolate_config_file(
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path_factory.mktemp("xdg")))
 
 
+@pytest.fixture(autouse=True)
+def _reset_run_caches() -> None:
+    """Start each test with no `once_per_run` results, as each purger command does."""
+    reset_run_caches()
+
+
 def make_action(**overrides: Any) -> Action:
     """Build a valid Action, letting tests override only the fields they care about.
 
@@ -83,11 +101,14 @@ def make_action(**overrides: Any) -> Action:
     """
     fields: dict[str, Any] = {
         "name": "a",
-        "tier": Tier.SAFE,
-        "help": "Remove things.",
-        "command": ("true",),
+        "risk_level": RiskLevel.SAFE,
+        "description": "Remove things.",
+        "cleanup": RunCommand("true"),
     }
     fields.update(overrides)
+    # A path-deleting action takes its size from its paths, so only a command gets a default size.
+    if not isinstance(fields["cleanup"], DeletePaths):
+        fields.setdefault("size", SizeUnknown(reason="test action"))
     return Action(**fields)
 
 
@@ -109,18 +130,6 @@ def table_row(table: Table, name: str) -> list[str]:
         rows = zip(*(list(column.cells) for column in table.columns), strict=True)
         cells = next(row for row in rows if Text.from_markup(str(row[0])).plain == name)
     return [Text.from_markup(str(cell)).plain for cell in cells]
-
-
-@pytest.fixture(name="make_action")
-def make_action_fixture() -> Callable[..., Action]:
-    """Provide the make_action factory as a fixture."""
-    return make_action
-
-
-@pytest.fixture(name="make_plugin")
-def make_plugin_fixture() -> Callable[..., Plugin]:
-    """Provide the make_plugin factory as a fixture."""
-    return make_plugin
 
 
 def make_completed(*, returncode: int = 0, stdout: str = "") -> CompletedCommand:

@@ -7,7 +7,7 @@ from rich.console import Console
 
 from purger.measure_display import MeasureDisplay
 from purger.reports import PluginReport, SkippedPlugin, SkipReason
-from tests.conftest import make_plugin
+from tests.conftest import EMPTY_SETTINGS, make_plugin
 
 
 def _console() -> tuple[Console, io.StringIO]:
@@ -38,11 +38,21 @@ def test_measure_display_rows_start_measuring() -> None:
     ("result", "expected"),
     [
         (
-            PluginReport(plugin=make_plugin(name="uv"), footprint_bytes=3_000_000, actions=[]),
+            PluginReport(
+                settings=EMPTY_SETTINGS,
+                plugin=make_plugin(name="uv"),
+                total_size_bytes=3_000_000,
+                actions=[],
+            ),
             "3.0 MB",
         ),
         (
-            PluginReport(plugin=make_plugin(name="uv"), footprint_bytes=None, actions=[]),
+            PluginReport(
+                settings=EMPTY_SETTINGS,
+                plugin=make_plugin(name="uv"),
+                total_size_bytes=None,
+                actions=[],
+            ),
             "size unknown",
         ),
         (SkippedPlugin(name="uv", reason=SkipReason.PLATFORM), "skipped (platform)"),
@@ -51,7 +61,7 @@ def test_measure_display_rows_start_measuring() -> None:
 def test_measure_display_finish_shows_result(
     result: PluginReport | SkippedPlugin, expected: str
 ) -> None:
-    """Verify a finished row shows the plugin's footprint or why it was skipped."""
+    """Verify a finished row shows the plugin's total size or why it was skipped."""
     # Given a display with one plugin row
     console, _ = _console()
     display = MeasureDisplay(["uv"], console=console)
@@ -72,7 +82,13 @@ def test_measure_display_is_transient_and_stops() -> None:
     # When it is used as a context manager
     with MeasureDisplay(["uv"], console=console) as display:
         display.finish(
-            "uv", PluginReport(plugin=make_plugin(name="uv"), footprint_bytes=1, actions=[])
+            "uv",
+            PluginReport(
+                settings=EMPTY_SETTINGS,
+                plugin=make_plugin(name="uv"),
+                total_size_bytes=1,
+                actions=[],
+            ),
         )
 
     # Then it is transient and no longer refreshing

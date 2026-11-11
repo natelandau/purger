@@ -8,83 +8,27 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import cast
 
-from purger.plugin import Plugin, Setting, SettingKind, SettingValue, matches_kind
+from purger.plugin import (
+    Plugin,
+    PluginSettings,
+    Setting,
+    SettingValue,
+)
 from purger.safety import invoking_home
 
 FALSY_VALUES = frozenset({"", "0", "false", "f", "no", "n", "off"})
-TRUTHY_VALUES = frozenset({"1", "true", "t", "yes", "y", "on"})
 _BOOL_WORDS: Mapping[str, bool] = {
-    **dict.fromkeys(TRUTHY_VALUES, True),
+    **dict.fromkeys(("1", "true", "t", "yes", "y", "on"), True),
     **dict.fromkeys(FALSY_VALUES, False),
 }
 
 _ENV_PREFIX = "PURGER_"
 _ENV_CONFIG = "PURGER_CONFIG"
 _ENV_SKIP = "PURGER_SKIP"
-_KIND_LABELS: Mapping[SettingKind, str] = {
-    "str": "a string",
-    "int": "an integer",
-    "bool": "a boolean",
-    "str_list": "a list of strings",
-}
 
 
 class ConfigError(Exception):
     """Raised when the config file or an environment variable holds an unusable value."""
-
-
-@dataclass(frozen=True, kw_only=True)
-class PluginSettings:
-    """One plugin's resolved settings for a run, with declared defaults filled in.
-
-    Handing a plugin its settings, rather than letting it read shared state,
-    keeps each run's values in one place and lets tests build them directly.
-    """
-
-    plugin: str
-    values: Mapping[str, SettingValue]
-
-    def value(self, name: str) -> SettingValue:
-        """Return a setting's configured value, or its declared default.
-
-        Args:
-            name: The setting's name.
-
-        Raises:
-            KeyError: If the plugin does not declare the setting.
-        """
-        if name not in self.values:
-            msg = f"plugin {self.plugin!r} declares no setting {name!r}"
-            raise KeyError(msg)
-        return self.values[name]
-
-    def _of_kind(self, name: str, *, kind: SettingKind) -> SettingValue:
-        """Return a setting's value after confirming it has the kind the caller expects.
-
-        Raises:
-            TypeError: If the setting's value is not of that kind.
-        """
-        value = self.value(name)
-        if not matches_kind(kind, value):
-            msg = f"setting {name!r} of plugin {self.plugin!r} is not {_KIND_LABELS[kind]}"
-            raise TypeError(msg)
-        return value
-
-    def str_list(self, name: str) -> tuple[str, ...]:
-        """Return a `str_list` setting's value as a tuple of strings.
-
-        Raises:
-            TypeError: If the setting is not a `str_list`.
-        """
-        return cast("tuple[str, ...]", self._of_kind(name, kind="str_list"))
-
-    def integer(self, name: str) -> int:
-        """Return an `int` setting's value.
-
-        Raises:
-            TypeError: If the setting is not an `int`.
-        """
-        return cast("int", self._of_kind(name, kind="int"))
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -146,54 +90,48 @@ def _split_list(raw: str) -> tuple[str, ...]:
     return tuple(item for part in raw.split(",") if (item := part.strip()))
 
 
-def _from_env(*, kind: SettingKind, raw: str) -> object:
-    """Convert an environment string toward a setting kind, unchanged when it does not fit."""
-    match kind:
-        case "str_list":
-            return _split_list(raw)
-        case "int":
-            try:
-                return int(raw)
-            except ValueError:
-                return raw
-        case "bool":
-            return _BOOL_WORDS.get(raw.strip().lower(), raw)
-        case "str":
+def _from_env(*, setting_def: Setting, raw: str) -> object:
+    """Convert an environment string toward a setting's type, unchanged when it does not fit."""
+    if setting_def.value_type is int:
+        try:
+            return int(raw)
+        except ValueError:
             return raw
-
-
-def _from_file(*, kind: SettingKind, raw: object) -> object:
-    """Convert a TOML value toward a setting kind, since TOML arrays load as lists."""
-    return tuple(raw) if kind == "str_list" and isinstance(raw, list) else raw
+    if setting_def.value_type is bool:
+        return _BOOL_WORDS.get(raw.strip().lower(), raw)
+    # Equality, because `list[str]` builds a new alias on each use.
+    if setting_def.value_type == list[str]:
+        return _split_list(raw)
+    return raw
 
 
 def _invalid(setting_def: Setting, *, raw: object, source: str) -> ConfigError:
-    """Build the error for a value that does not have the setting's kind."""
+    """Build the error for a value that does not have the setting's type."""
     msg = (
         f"{source}: {raw!r} is not valid for {setting_def.name!r}, "
-        f"expected {_KIND_LABELS[setting_def.kind]}"
+        f"expected {setting_def.expected_type_description}"
     )
     return ConfigError(msg)
 
 
 def _validated(setting_def: Setting, *, raw: object, value: object, source: str) -> SettingValue:
-    """Check a converted value against the setting's kind and its own check.
+    """Check a converted value against the setting's type and its `validate` function.
 
     Args:
         setting_def: The setting the value is for.
-        raw: The value as the user wrote it, quoted in a kind error.
-        value: The value converted toward the setting's kind.
+        raw: The value as the user wrote it, quoted in a type error.
+        value: The value converted toward the setting's type.
         source: Where the value came from, for error messages.
 
     Raises:
-        ConfigError: If the value has the wrong kind or fails the setting's check.
+        ConfigError: If the value has the wrong type or fails the setting's `validate`.
     """
-    if not matches_kind(setting_def.kind, value):
+    if not setting_def.accepts(value):
         raise _invalid(setting_def, raw=raw, source=source)
     checked = cast("SettingValue", value)
-    if setting_def.check is not None:
+    if setting_def.validate is not None:
         try:
-            setting_def.check(checked)
+            setting_def.validate(checked)
         except ValueError as error:
             msg = f"{source}: {checked!r} is not valid for {setting_def.name!r}: {error}"
             raise ConfigError(msg) from error
@@ -263,7 +201,8 @@ def _read_file_plugins(
             values.setdefault(plugin_name, {})[key] = _validated(
                 setting_def,
                 raw=raw,
-                value=_from_file(kind=setting_def.kind, raw=raw),
+                # TOML arrays load as lists, and list settings hold tuples.
+                value=tuple(raw) if isinstance(raw, list) else raw,
                 source=f"{source} [plugins.{plugin_name}]",
             )
     return values, warnings
@@ -298,7 +237,7 @@ def _read_env(*, plugins: Mapping[str, Plugin], env: Mapping[str, str]) -> _EnvO
             values.setdefault(plugin_name, {})[setting_def.name] = _validated(
                 setting_def,
                 raw=raw,
-                value=_from_env(kind=setting_def.kind, raw=raw),
+                value=_from_env(setting_def=setting_def, raw=raw),
                 source=f"environment variable {name}",
             )
         else:
@@ -319,7 +258,7 @@ def load_config(plugins: Mapping[str, Plugin], *, env: Mapping[str, str] | None 
 
     Raises:
         ConfigError: If the file is unreadable or invalid TOML, or a file or
-            environment value has the wrong type or fails a setting's check.
+            environment value has the wrong type or fails a setting's `validate`.
     """
     environment = os.environ if env is None else env
     try:
