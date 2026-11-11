@@ -175,7 +175,7 @@ _EXPECTED_ACTIONS: list[tuple[str, str, Tier, tuple[str, ...] | None]] = [
     ("projects", "builds", Tier.CAUTION, None),
     ("projects", "custom", Tier.CAUTION, None),
     ("rip2", "decompose", Tier.CAUTION, ("rip", "--decompose", "--force")),
-    ("ruby", "old-versions", Tier.CAUTION, ("gem", "cleanup")),
+    ("ruby", "old-versions", Tier.CAUTION, ("gem", "cleanup", "--no-user-install")),
     ("trash", "empty", Tier.CAUTION, None),
     ("xcode", "derived-data", Tier.SAFE, None),
     ("xcode", "device-support", Tier.CAUTION, None),

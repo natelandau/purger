@@ -1513,3 +1513,62 @@ def test_git_guard_uses_canonical_caseless_matching(tmp_path: Path, git: GitMock
 
     # Then
     assert result == empty()
+
+
+def test_project_folder_prefers_git_root_below_scan_root(tmp_path: Path) -> None:
+    """Verify a repository below the root is the project its leftovers belong to."""
+    # Given a repository two levels below the root
+    root = tmp_path / "root"
+    (root / "team" / "app" / ".git").mkdir(parents=True)
+
+    # When / Then
+    found = scanner.project_folder(root / "team" / "app" / "node_modules", root)
+    assert found == root / "team" / "app"
+
+
+def test_project_folder_ignores_repo_above_root(tmp_path: Path) -> None:
+    """Verify a repository above the root does not merge every project into one."""
+    # Given a repository that holds the whole root
+    (tmp_path / ".git").mkdir()
+    root = tmp_path / "root"
+    (root / "proj" / "sub").mkdir(parents=True)
+
+    # When / Then
+    assert scanner.project_folder(root / "proj" / "sub" / ".venv", root) == root / "proj"
+
+
+def test_details_group_by_project_with_counts(home: Path) -> None:
+    """Verify rows group a project's leftovers and count repeated names."""
+    # Given one root holding one project
+    project = home / "code" / "proj"
+    project.mkdir(parents=True)
+    sizes = {
+        project / ".venv": 100,
+        project / "a" / "__pycache__": 1,
+        project / "b" / "__pycache__": 2,
+    }
+
+    # When
+    rows = projects._details(sizes, configure(paths=("~/code",)))
+
+    # Then
+    assert len(rows) == 1
+    assert rows[0].label == "proj"
+    assert rows[0].size_bytes == 103
+    assert rows[0].items == (".venv", "2 __pycache__")
+    assert rows[0].key == str(project)
+
+
+def test_details_two_roots_same_name_stay_apart(home: Path, mocker: MockerFixture) -> None:
+    """Verify same-named projects under different roots keep separate rows."""
+    # Given two roots that each hold a project named foo
+    mocker.patch("purger.details.invoking_home", return_value=home)
+    for root in ("code", "work"):
+        (home / root / "foo").mkdir(parents=True)
+    sizes = {home / "code" / "foo" / ".venv": 10, home / "work" / "foo" / ".venv": 20}
+
+    # When
+    rows = projects._details(sizes, configure(paths=("~/code", "~/work")))
+
+    # Then
+    assert sorted(row.label for row in rows) == ["~/code/foo", "~/work/foo"]

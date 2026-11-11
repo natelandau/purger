@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from purger.plugin import Action, Plugin, Setting, Tier
+from purger.plugin import Action, Detail, Plugin, Setting, Tier
 from tests.conftest import make_action, make_plugin
 
 
@@ -200,3 +200,10 @@ def test_setting_rejects_default_failing_its_check() -> None:
     # Given / When / Then
     with pytest.raises(ValueError, match="fails its own check"):
         _setting(check=_reject_every_value)
+
+
+def test_detail_rejects_blank_label() -> None:
+    """Verify a detail row needs a label to show."""
+    # Given / When / Then
+    with pytest.raises(ValueError, match="label"):
+        Detail(label=" ", size_bytes=1)

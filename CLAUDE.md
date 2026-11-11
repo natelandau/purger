@@ -23,7 +23,7 @@ Each plugin gets its own test file, `tests/plugins/test_<module>.py`. Never add 
 
 ## Public contracts
 
-The JSON document shape (`schema_version: 1`), the status values, the exit codes, and the CLI flags are public. A change to any of them is a breaking change.
+The JSON document shape (`schema_version: 1`), the status values, the exit codes, and the CLI flags are public. Removing, renaming, or changing the meaning or type of any of them is a breaking change. Adding a new JSON field, status value, or flag is never breaking.
 
 ## nclutils
 

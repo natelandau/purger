@@ -3,47 +3,34 @@
 import glob
 import logging
 import re
+from functools import cache
 from pathlib import Path
 
 from nclutils.sh import ShellCommandError, run_command
 
 from purger.plugin import Action, Plugin, Tier
 from purger.plugins._shared import program_matcher
-from purger.sizing import SIZE_CMD_TIMEOUT_SECONDS, printed_dir_usage
+from purger.safety import invoking_home
+from purger.sizing import SIZE_CMD_TIMEOUT_SECONDS, printed_dir, printed_dir_usage
 
 logger = logging.getLogger(__name__)
 
 _GEM_DIR_CMD = ("gem", "env", "gemdir")
+# A `gem: --user-install` line in .gemrc would otherwise point cleanup at ~/.gem, not GEM_HOME.
+_CLEANUP_CMD = ("gem", "cleanup", "--no-user-install")
 _WOULD_UNINSTALL = re.compile(r"^Dry Run Mode: Would uninstall (\S+)$", re.MULTILINE)
 
 
-def _parse_gem_dir(output: str) -> Path:
-    """Read the GEM_HOME that `gem env gemdir` prints.
-
-    Args:
-        output: Standard output of `gem env gemdir`.
-
-    Returns:
-        Path: The directory `gem cleanup` removes gems from.
-
-    Raises:
-        ValueError: If the output is not exactly one absolute path.
-    """
-    lines = [line.strip() for line in output.splitlines() if line.strip()]
-    if len(lines) != 1 or not Path(lines[0]).is_absolute():
-        msg = f"expected one absolute directory from `gem env gemdir`, got {output!r}"
-        raise ValueError(msg)
-    return Path(lines[0])
-
-
+@cache
 def _gem_dir() -> Path:
-    """Ask RubyGems for the GEM_HOME of the active Ruby.
+    """Ask RubyGems for the GEM_HOME of the active Ruby, once per run.
 
     Returns:
-        Path: The active Ruby's GEM_HOME.
+        Path: The active Ruby's GEM_HOME with symlinks resolved, so its files are
+            measured at the real paths `gem cleanup` removes.
     """
     output = run_command(list(_GEM_DIR_CMD), timeout=SIZE_CMD_TIMEOUT_SECONDS).stdout
-    return _parse_gem_dir(output)
+    return printed_dir(output, single_line=True)
 
 
 def _is_available() -> bool:
@@ -53,12 +40,20 @@ def _is_available() -> bool:
     `gem cleanup` would need sudo to change it, so it is left alone.
 
     Returns:
-        bool: True when GEM_HOME exists and has the same owner as the home directory.
+        bool: True when GEM_HOME exists and has the same owner as the invoking
+            user's home directory.
     """
     try:
         gem_dir = _gem_dir()
-        return gem_dir.is_dir() and gem_dir.owner() == Path.home().owner()
-    except (ShellCommandError, ValueError, OSError, KeyError, NotImplementedError) as exc:
+        return gem_dir.is_dir() and gem_dir.owner() == invoking_home().owner()
+    except (
+        ShellCommandError,
+        ValueError,
+        OSError,
+        KeyError,
+        NotImplementedError,
+        RuntimeError,
+    ) as exc:
         logger.debug("skipping ruby: cannot use the gem directory: %s", exc)
         return False
 
@@ -67,7 +62,7 @@ def _old_version_names(output: str) -> list[str]:
     """Read the gem full names, such as `rake-13.0.6`, that a `gem cleanup` dry run lists.
 
     Args:
-        output: Standard output of `gem cleanup --dryrun`.
+        output: Standard output of a `gem cleanup` dry run.
 
     Returns:
         list[str]: The full name of each gem version the cleanup would remove, once
@@ -105,7 +100,8 @@ def _old_version_paths() -> tuple[str, ...]:
         tuple[str, ...]: Glob-safe patterns for each old version's files.
     """
     gem_dir = _gem_dir()
-    output = run_command(["gem", "cleanup", "--dryrun"], timeout=SIZE_CMD_TIMEOUT_SECONDS).stdout
+    # `-n` is the dry-run flag in every RubyGems release; `--dryrun` is deprecated.
+    output = run_command([*_CLEANUP_CMD, "-n"], timeout=SIZE_CMD_TIMEOUT_SECONDS).stdout
     return tuple(
         pattern
         for full_name in _old_version_names(output)
@@ -131,7 +127,7 @@ PLUGIN = Plugin(
                 "needs. A project whose Gemfile.lock pins an older version needs "
                 "`bundle install` again."
             ),
-            command=("gem", "cleanup"),
+            command=_CLEANUP_CMD,
             paths=_old_version_paths,
         ),
     ),

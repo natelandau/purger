@@ -150,6 +150,12 @@ PLUGIN = Plugin(
             parse_size=partial(printed_dir_usage, patterns=("packages/*",)),
             # Turns a failed command's stderr into a hint that leads the error.
             explain_failure=_explain_failure,
+            # Breaks the action's size into rows for `-v` and `--json`. It receives
+            # each resolved path's size and the plugin's settings, and returns
+            # `Detail` rows, such as one per project. Without it, an action with
+            # paths shows one row per path, which is also the fallback when the
+            # hook raises.
+            # details=_details,
         ),
         Action(
             name="logs",

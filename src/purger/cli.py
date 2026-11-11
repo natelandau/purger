@@ -2,7 +2,6 @@
 
 import json
 import os
-import shlex
 import sys
 from collections.abc import Callable, Iterable, Sequence
 from contextvars import ContextVar
@@ -19,6 +18,7 @@ from purger import __version__
 from purger.clean_flow import CleanOptions, plan_clean
 from purger.concurrency import map_as_completed
 from purger.config import FALSY_VALUES, Config, ConfigError, load_config
+from purger.details import largest_first
 from purger.execution import execute, mark_unfinished, record_freed
 from purger.help_text import (
     APP_HELP,
@@ -30,11 +30,14 @@ from purger.help_text import (
 )
 from purger.measure_display import MeasureDisplay
 from purger.output import (
+    action_summary,
     clean_document,
     error_document,
     info_document,
+    render_plugin_details,
     render_results,
     render_table,
+    render_total,
 )
 from purger.plugin import Plugin, Tier
 from purger.registry import (
@@ -176,14 +179,22 @@ def _error(code: str, message: str, *, exit_code: ExitCode, json_output: bool) -
 
 
 def _measure_one(
-    plugin: Plugin, *, dangerous: bool, processes: ProcessTable, config: Config
+    plugin: Plugin,
+    *,
+    dangerous: bool,
+    processes: ProcessTable,
+    config: Config,
+    with_details: bool = False,
 ) -> PluginReport | SkippedPlugin:
     reason = skip_reason(plugin, processes=processes)
     if reason is not None:
         return SkippedPlugin(name=plugin.name, reason=reason)
     try:
         return measure_plugin(
-            plugin, include_dangerous=dangerous, settings=config.settings_for(plugin)
+            plugin,
+            include_dangerous=dangerous,
+            settings=config.settings_for(plugin),
+            with_details=with_details,
         )
     except NotConfiguredError:
         return SkippedPlugin(name=plugin.name, reason=SkipReason.NOT_CONFIGURED)
@@ -195,6 +206,7 @@ def _measure(
     dangerous: bool,
     display: MeasureDisplay | None,
     config: Config,
+    with_details: bool = False,
 ) -> _Scan:
     """Check and measure plugins concurrently, keeping results in plugin order.
 
@@ -203,7 +215,13 @@ def _measure(
     """
     results: dict[int, PluginReport | SkippedPlugin] = {}
     for index, result in map_as_completed(
-        partial(_measure_one, dangerous=dangerous, processes=ProcessTable(), config=config),
+        partial(
+            _measure_one,
+            dangerous=dangerous,
+            processes=ProcessTable(),
+            config=config,
+            with_details=with_details,
+        ),
         items=plugins,
     ):
         results[index] = result
@@ -218,7 +236,9 @@ def _measure(
     return scan
 
 
-def _scan(names: Sequence[str], *, dangerous: bool, json_output: bool, config: Config) -> _Scan:
+def _scan(
+    names: Sequence[str], *, dangerous: bool, json_output: bool, config: Config, with_details: bool
+) -> _Scan:
     """Select and measure plugins, with a live row per plugin unless output is JSON.
 
     Raises:
@@ -228,10 +248,22 @@ def _scan(names: Sequence[str], *, dangerous: bool, json_output: bool, config: C
         registry=discover_plugins(), names=names, skip=frozenset(config.skip)
     )
     if json_output:
-        scan = _measure(selection.plugins, dangerous=dangerous, display=None, config=config)
+        scan = _measure(
+            selection.plugins,
+            dangerous=dangerous,
+            display=None,
+            config=config,
+            with_details=with_details,
+        )
     else:
         with MeasureDisplay([plugin.name for plugin in selection.plugins]) as display:
-            scan = _measure(selection.plugins, dangerous=dangerous, display=display, config=config)
+            scan = _measure(
+                selection.plugins,
+                dangerous=dangerous,
+                display=display,
+                config=config,
+                with_details=with_details,
+            )
     scan.skipped.extend(selection.disabled)
     return scan
 
@@ -257,7 +289,14 @@ def _begin(
     for warning in config.warnings:
         pp.warning(warning)
     try:
-        return _scan(names, dangerous=dangerous, json_output=json_output, config=config)
+        return _scan(
+            names,
+            dangerous=dangerous,
+            json_output=json_output,
+            config=config,
+            # Detail costs a per-path walk, so it is built only when output shows it.
+            with_details=verbose > 0 or json_output,
+        )
     except UnknownPluginError as exc:
         return _error(
             code="unknown_plugin",
@@ -324,14 +363,21 @@ def _print_plan(reports: list[PluginReport]) -> None:
         pp.info("Nothing to clean.")
         return
     for label, report in planned:
-        action = report.action
-        prefix = f"{label} ({action.tier.value})"
-        if action.command is not None:
-            sudo = "sudo " if action.needs_sudo else ""
-            pp.dryrun(f"{prefix}: would run {sudo}{shlex.join(action.command)}")
-        else:
-            for path in report.resolved_paths:
-                pp.dryrun(f"{prefix}: would delete {path}")
+        pp.dryrun(f"{label} ({report.action.tier.value}): {action_summary(report)}")
+
+
+def _print_overview(reports: list[PluginReport], *, verbosity: int, by_action: bool) -> None:
+    """Print the table, or at `-v` a section per plugin, largest first, then the total."""
+    if verbosity == 0 or not reports:
+        _print_table(reports)
+        return
+    console = pp.console()
+    for report in sorted(
+        reports, key=lambda r: largest_first(size=r.footprint_bytes, name=r.plugin.name)
+    ):
+        console.print(render_plugin_details(report, verbosity=verbosity, by_action=by_action))
+        console.print()
+    console.print(render_total(reports))
 
 
 def _print_results(reports: list[PluginReport], ran: list[PluginReport]) -> None:
@@ -424,7 +470,7 @@ def info(
     if json_output:
         _emit_json(info_document(reports=scan.reports, skipped=scan.skipped))
     else:
-        _print_table(scan.reports)
+        _print_overview(scan.reports, verbosity=verbosity, by_action=False)
     _report_skipped(skipped=scan.skipped, names=plugins)
     return ExitCode.OK
 
@@ -434,7 +480,11 @@ def clean(
     *plugins: PluginNames,
     dangerous: DangerousFlag = False,
     dry_run: Annotated[
-        bool, Parameter(help="List what would be cleaned. Asks nothing and changes nothing.")
+        bool,
+        Parameter(
+            name=["--dry-run", "-n"],
+            help="List what would be cleaned. Asks nothing and changes nothing.",
+        ),
     ] = False,
     yes: Annotated[
         bool,
@@ -465,7 +515,7 @@ def clean(
         return scan
 
     if not json_output:
-        _print_table(scan.reports)
+        _print_overview(scan.reports, verbosity=verbosity, by_action=True)
     _report_skipped(skipped=scan.skipped, names=plugins)
 
     interactive = sys.stdin.isatty() and not json_output
@@ -487,7 +537,11 @@ def clean(
         _warn_not_run(scan.reports)
 
     if dry_run:
-        _show_clean(scan, json_output=json_output, show=lambda: _print_plan(scan.reports))
+        _show_clean(
+            scan,
+            json_output=json_output,
+            show=lambda: _print_plan(scan.reports),
+        )
         return ExitCode.OK
 
     return _run_approved(
