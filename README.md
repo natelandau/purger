@@ -40,7 +40,7 @@ purger runs on macOS and Linux. Each supported tool is a plugin, and each plugin
 - `xcode` (macOS): build products, device debug symbols, and app archives.
 - `yarn` (macOS, Linux): the global package cache, even when yarn is no longer installed.
 
-purger skips a plugin when its tool is not installed, is not running, or does not apply to your platform. Run `purger clean --dry-run` to see the actions that would run, with their risk tiers.
+purger skips a plugin when its tool is not installed, is not running, is running a command that could use the files a cleanup removes, or does not apply to your platform. Run `purger clean --dry-run` to see the actions that would run, with their risk tiers.
 
 ## Install
 

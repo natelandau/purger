@@ -44,7 +44,11 @@ PLUGIN = Plugin(
     name="yarn",
     description="Yarn global package cache",
     is_available=_has_cache,
-    busy_process=program_matcher(r"yarn(\.c?js|-\d[\w.-]*\.cjs)?"),
+    # Package scripts such as `yarn run dev` can run for hours and leave the cache alone.
+    busy_process=program_matcher(
+        r"yarn(\.c?js|-\d[\w.-]*\.cjs)?",
+        ignore_subcommands=frozenset({"run", "exec", "node"}),
+    ),
     actions=(
         Action(
             name="cache",

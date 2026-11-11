@@ -50,8 +50,10 @@ def program_matcher(
         words = _argv_words(cmdline)
         if not words:
             return False
-        program_at = [0, *[i for i, arg in enumerate(words) if i and not arg.startswith("-")][:1]]
-        for index in program_at:
+        script_at = next((i for i, arg in enumerate(words) if i and not arg.startswith("-")), None)
+        for index in (0, script_at):
+            if index is None:
+                continue
             if program.fullmatch(Path(words[index]).name):
                 subcommand = next((a for a in words[index + 1 :] if not a.startswith("-")), None)
                 return subcommand not in ignore_subcommands

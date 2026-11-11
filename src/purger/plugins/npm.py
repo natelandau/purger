@@ -38,9 +38,28 @@ PLUGIN = Plugin(
     size_cmd=_CACHE_DIR_CMD,
     # Only the parts purger can clean, so the two cleanups account for the whole footprint.
     parse_size=partial(printed_dir_usage, patterns=("_cacache", "_npx")),
-    # npx and `npm exec` often run for hours as MCP servers or a status line,
-    # and leave the package cache alone, so only other npm commands count.
-    busy_process=program_matcher(r"npm(-cli\.js)?", ignore_subcommands=frozenset({"exec", "x"})),
+    # npx, `npm exec`, and package scripts such as `npm run dev` often run for
+    # hours as MCP servers, a status line, or a dev server, and leave the
+    # package cache alone, so only other npm commands count.
+    busy_process=program_matcher(
+        r"npm(-cli\.js)?",
+        ignore_subcommands=frozenset(
+            {
+                "exec",
+                "x",
+                "run",
+                "run-script",
+                "rum",
+                "urn",
+                "start",
+                "stop",
+                "restart",
+                "test",
+                "t",
+                "tst",
+            }
+        ),
+    ),
     actions=(
         Action(
             name="verify",

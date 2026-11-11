@@ -48,7 +48,11 @@ PLUGIN = Plugin(
     requires="pnpm",
     size_cmd=("pnpm", "store", "path"),
     parse_size=printed_dir_usage,
-    busy_process=program_matcher(r"pnp[mx](\.c?js)?"),
+    # Package scripts such as `pnpm run dev` can run for hours and leave the store alone.
+    busy_process=program_matcher(
+        r"pnp[mx](\.c?js)?",
+        ignore_subcommands=frozenset({"run", "run-script", "exec", "start", "test", "t"}),
+    ),
     actions=(
         Action(
             name="prune",
