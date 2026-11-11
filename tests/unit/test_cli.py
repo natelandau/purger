@@ -4,21 +4,25 @@ import json
 import sys
 import threading
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
 from pytest_mock import MockerFixture, MockType
 
 from purger import cli
 from purger.cli import ExitCode, app, confirm, main
+from purger.config import Config, PluginSettings
 from purger.measure_display import MeasureDisplay
-from purger.plugin import Plugin, Tier
-from purger.reports import ActionReport, PluginReport, SkipReason, Status
+from purger.plugin import Plugin, Setting, Tier
+from purger.reports import ActionReport, PluginReport, SkippedPlugin, SkipReason, Status
 from tests.conftest import make_action, make_plugin, table_row
 
 _SIZE = 100
 
 
-def _fake_measure(plugin: Plugin, *, include_dangerous: bool) -> PluginReport:
+def _fake_measure(
+    plugin: Plugin, *, include_dangerous: bool, settings: PluginSettings
+) -> PluginReport:
     """Measure every action as a fixed size, honoring the DANGEROUS filter."""
     actions = [
         ActionReport(action=action, size_bytes=_SIZE, resolved_paths=[])
@@ -38,8 +42,12 @@ def _patch_measure(mocker: MockerFixture, *, side_effect: object) -> MockType:
     mocker.patch(
         "purger.execution.measure_footprint",
         autospec=True,
-        side_effect=lambda plugin, *, include_dangerous: (
-            measure(plugin, include_dangerous=include_dangerous).footprint_bytes
+        side_effect=lambda plugin, *, include_dangerous, prepared_paths: (
+            measure(
+                plugin,
+                include_dangerous=include_dangerous,
+                settings=Config().settings_for(plugin),
+            ).footprint_bytes
         ),
     )
     return measure
@@ -495,7 +503,7 @@ def test_clean_human_prints_results_table(
     # Given
     plugin = make_plugin(name="alpha")
     mocker.patch("purger.cli.discover_plugins", autospec=True, return_value={plugin.name: plugin})
-    before = _fake_measure(plugin, include_dangerous=False)
+    before = _fake_measure(plugin, include_dangerous=False, settings=Config().settings_for(plugin))
     after = PluginReport(plugin=plugin, footprint_bytes=40, actions=[])
     _patch_measure(mocker, side_effect=[before, after])
     mocker.patch("purger.execution.run_action", autospec=True, side_effect=_mark_done)
@@ -522,7 +530,7 @@ def test_clean_human_lists_failures_under_table(
     # Given a tool whose second action fails
     plugin = make_plugin(name="alpha", actions=(make_action(name="one"), make_action(name="two")))
     mocker.patch("purger.cli.discover_plugins", autospec=True, return_value={plugin.name: plugin})
-    before = _fake_measure(plugin, include_dangerous=False)
+    before = _fake_measure(plugin, include_dangerous=False, settings=Config().settings_for(plugin))
     after = PluginReport(plugin=plugin, footprint_bytes=50, actions=[])
     _patch_measure(mocker, side_effect=[before, after])
 
@@ -642,7 +650,7 @@ def test_clean_json_interrupt_while_remeasuring(
     # Given
     plugin = make_plugin(name="alpha")
     mocker.patch("purger.cli.discover_plugins", autospec=True, return_value={plugin.name: plugin})
-    before = _fake_measure(plugin, include_dangerous=False)
+    before = _fake_measure(plugin, include_dangerous=False, settings=Config().settings_for(plugin))
     _patch_measure(mocker, side_effect=[before, KeyboardInterrupt])
     mocker.patch("purger.execution.run_action", autospec=True, side_effect=_mark_done)
 
@@ -756,12 +764,14 @@ def test_measure_keeps_plugin_order_when_plugins_finish_out_of_order(
     # Given alpha finishes only after beta starts, and gamma does not apply here
     beta_started = threading.Event()
 
-    def measure(plugin: Plugin, *, include_dangerous: bool) -> PluginReport:
+    def measure(
+        plugin: Plugin, *, include_dangerous: bool, settings: PluginSettings
+    ) -> PluginReport:
         if plugin.name == "alpha":
             assert beta_started.wait(timeout=5)
         elif plugin.name == "beta":
             beta_started.set()
-        return _fake_measure(plugin, include_dangerous=include_dangerous)
+        return _fake_measure(plugin, include_dangerous=include_dangerous, settings=settings)
 
     mocker.patch("purger.cli.measure_plugin", autospec=True, side_effect=measure)
     mocker.patch(
@@ -775,7 +785,7 @@ def test_measure_keeps_plugin_order_when_plugins_finish_out_of_order(
     display = mocker.Mock(spec=MeasureDisplay)
 
     # When
-    scan = cli._measure(plugins, dangerous=False, display=display)
+    scan = cli._measure(plugins, dangerous=False, display=display, config=Config())
 
     # Then
     assert [r.plugin.name for r in scan.reports] == ["alpha", "beta", "delta"]
@@ -792,8 +802,193 @@ def test_measure_shares_one_process_table(mocker: MockerFixture) -> None:
     plugins = [make_plugin(name=name) for name in ("alpha", "beta", "gamma")]
 
     # When
-    cli._measure(plugins, dangerous=False, display=None)
+    cli._measure(plugins, dangerous=False, display=None, config=Config())
 
     # Then
     tables = {id(call.kwargs["processes"]) for call in skip.call_args_list}
     assert len(tables) == 1
+
+
+@pytest.fixture
+def config_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Callable[[str], None]:
+    """Write a config file and point PURGER_CONFIG at it."""
+
+    def _write(text: str) -> None:
+        path = tmp_path / "config.toml"
+        path.write_text(text, encoding="utf-8")
+        monkeypatch.setenv("PURGER_CONFIG", str(path))
+
+    return _write
+
+
+def test_skip_setting_leaves_plugin_out(
+    patch_registry: Callable[..., None],
+    config_file: Callable[[str], None],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify a plugin in the skip setting is reported as disabled and not measured."""
+    # Given
+    patch_registry(make_plugin(name="a"), make_plugin(name="b"))
+    config_file('skip = ["a"]\n')
+
+    # When
+    code = _run("info", "--json")
+
+    # Then
+    doc = _json(capsys)
+    assert code == ExitCode.OK
+    assert [item["name"] for item in doc["plugins"]] == ["b"]
+    assert {"name": "a", "reason": "disabled"} in doc["skipped"]
+
+
+def test_named_plugin_ignores_skip(
+    patch_registry: Callable[..., None],
+    config_file: Callable[[str], None],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify naming a plugin measures it even when the skip setting lists it."""
+    # Given
+    patch_registry(make_plugin(name="a"), make_plugin(name="b"))
+    config_file('skip = ["a"]\n')
+
+    # When
+    code = _run("info", "a", "--json")
+
+    # Then
+    doc = _json(capsys)
+    assert code == ExitCode.OK
+    assert [item["name"] for item in doc["plugins"]] == ["a"]
+
+
+def test_config_error_exits_with_usage(
+    patch_registry: Callable[..., None],
+    config_file: Callable[[str], None],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify an unreadable config file exits 2 with a config_error document."""
+    # Given
+    patch_registry(make_plugin(name="a"))
+    config_file("skip = [\n")
+
+    # When
+    code = _run("info", "--json")
+
+    # Then
+    doc = _json(capsys)
+    assert code == ExitCode.USAGE
+    assert doc["error"]["code"] == "config_error"
+
+
+def test_config_warning_stays_off_stdout_in_json_mode(
+    patch_registry: Callable[..., None],
+    config_file: Callable[[str], None],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify a config warning goes to stderr so stdout stays one JSON document."""
+    # Given
+    patch_registry(make_plugin(name="a"))
+    config_file("bogus = 1\n")
+
+    # When
+    code = _run("info", "--json")
+
+    # Then
+    captured = capsys.readouterr()
+    assert code == ExitCode.OK
+    assert json.loads(captured.out)["schema_version"] == 1
+    assert "unknown key 'bogus'" in captured.err
+
+
+def test_reason_text_covers_disabled() -> None:
+    """Verify the disabled skip reason has a message naming the skip setting."""
+    # Given / When
+    text = cli._reason_text(SkipReason.DISABLED)
+
+    # Then
+    assert "skip setting" in text
+
+
+def test_clean_json_reports_skipped_plugin_without_running_it(
+    patch_registry: Callable[..., None],
+    config_file: Callable[[str], None],
+    mocker: MockerFixture,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify clean --json reports a skip-listed plugin as disabled and never runs it."""
+    # Given
+    patch_registry(
+        make_plugin(name="a", actions=(make_action(name="a-act"),)),
+        make_plugin(name="b", actions=(make_action(name="b-act"),)),
+    )
+    config_file('skip = ["a"]\n')
+    run_action = mocker.patch("purger.execution.run_action", autospec=True, side_effect=_mark_done)
+
+    # When
+    code = _run("clean", "--json", "--yes")
+
+    # Then
+    doc = _json(capsys)
+    assert code == ExitCode.OK
+    assert {"name": "a", "reason": "disabled"} in doc["skipped"]
+    assert [item["name"] for item in doc["plugins"]] == ["b"]
+    assert [c.args[0].action.name for c in run_action.call_args_list] == ["b-act"]
+
+
+def test_measure_hands_each_plugin_its_configured_settings(mocker: MockerFixture) -> None:
+    """Verify measuring passes every plugin the settings the run's config resolves for it."""
+    # Given
+    measure = mocker.patch("purger.cli.measure_plugin", autospec=True, side_effect=_fake_measure)
+    mocker.patch("purger.cli.skip_reason", autospec=True, return_value=None)
+    plugin = make_plugin(
+        name="alpha",
+        settings=(Setting(name="depth", kind="int", default=3, help="How deep to look."),),
+    )
+    config = Config(values={"alpha": {"depth": 8}})
+
+    # When
+    cli._measure([plugin], dangerous=False, display=None, config=config)
+
+    # Then
+    settings = measure.call_args.kwargs["settings"]
+    assert settings == config.settings_for(plugin)
+    assert settings.integer("depth") == 8
+
+
+def test_measure_skips_a_plugin_whose_prepare_reports_not_configured() -> None:
+    """Verify a prepare hook returning None skips the plugin as not configured."""
+    # Given
+    plugin = make_plugin(
+        name="alpha",
+        prepare=lambda _: None,
+        actions=(make_action(command=None, prepared=True),),
+    )
+
+    # When
+    scan = cli._measure([plugin], dangerous=False, display=None, config=Config())
+
+    # Then
+    assert scan.reports == []
+    assert scan.skipped == [SkippedPlugin(name="alpha", reason=SkipReason.NOT_CONFIGURED)]
+
+
+def test_measure_does_not_prepare_a_plugin_that_is_unavailable() -> None:
+    """Verify an unavailable plugin is skipped before its prepare hook runs."""
+    # Given
+    calls: list[str] = []
+
+    def prepare(_: PluginSettings) -> None:
+        calls.append("prepare")
+
+    plugin = make_plugin(
+        name="alpha",
+        is_available=lambda: False,
+        prepare=prepare,
+        actions=(make_action(command=None, prepared=True),),
+    )
+
+    # When
+    scan = cli._measure([plugin], dangerous=False, display=None, config=Config())
+
+    # Then
+    assert scan.skipped == [SkippedPlugin(name="alpha", reason=SkipReason.UNAVAILABLE)]
+    assert calls == []

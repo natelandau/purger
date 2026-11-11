@@ -1,6 +1,7 @@
 """Shared test factories."""
 
 import importlib
+import os
 import pkgutil
 import shutil
 import sys
@@ -59,6 +60,19 @@ def _block_real_commands(monkeypatch: pytest.MonkeyPatch) -> None:
         for name in _SPAWNERS:
             if hasattr(module, name):
                 monkeypatch.setattr(module, name, guard(getattr(module, name)))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_config_file(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Point config lookup at an empty directory and drop every purger env var.
+
+    A developer's real config file or `PURGER_*` variables must never change a result.
+    """
+    for name in [name for name in os.environ if name.startswith("PURGER_")]:
+        monkeypatch.delenv(name)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path_factory.mktemp("xdg")))
 
 
 def make_action(**overrides: Any) -> Action:

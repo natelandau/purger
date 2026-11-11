@@ -29,6 +29,13 @@ document on stdout. `purger clean --json --yes` cleans `safe` caches only.
 so a non-interactive run reports them as `declined`. Do not run purger as root:
 it refuses, and it asks for sudo only for the actions that need it.
 
+**Configuration.** purger reads `~/.config/purger/config.toml` (or the file in
+`PURGER_CONFIG`). A top-level `skip` list turns plugins off, and each
+`[plugins.<name>]` table sets that plugin's options. Every setting also has a
+`PURGER_*` environment variable, which wins over the file. The `projects` plugin
+cleans tool caches and build leftovers inside your project folders, and does
+nothing until you set its `paths`. See the README for every setting.
+
 Start with `purger info` to see what can be cleaned, then run `purger clean`.
 """
 
@@ -74,7 +81,8 @@ _INFO_EXIT_CODES = """\
 **Exit codes**
 
 - `0`: success.
-- `2`: usage error, such as an unknown plugin name or running as root.
+- `2`: usage error, such as an unknown plugin name, an invalid config file or
+  `PURGER_*` variable, or running as root.
 - `130`: interrupted with Ctrl-C.
 """
 
@@ -83,14 +91,16 @@ _CLEAN_EXIT_CODES = """\
 
 - `0`: success, including when every action was declined.
 - `1`: at least one confirmed action failed.
-- `2`: usage error, such as an unknown plugin name or running as root.
+- `2`: usage error, such as an unknown plugin name, an invalid config file or
+  `PURGER_*` variable, or running as root.
 - `130`: interrupted with Ctrl-C.
 """
 
 _JSON_ERRORS = """\
 Usage errors print `{"schema_version": 1, "error": {"code": ..., "message": ...}}`
-with code `usage` (an unknown option or a bad value), `unknown_plugin`,
-`running_as_root`, or `interrupted` (Ctrl-C while measuring).
+with code `usage` (an unknown option or a bad value), `config_error` (an invalid
+config file or environment variable), `unknown_plugin`, `running_as_root`, or
+`interrupted` (Ctrl-C while measuring).
 """
 
 INFO_EPILOGUE = f"""\
@@ -109,7 +119,7 @@ Top-level keys: `schema_version` (always 1), `platform` (`darwin` or `linux`),
 `footprint_bytes`, and `actions`. Each action has `name`, `tier`, `help`,
 `size_bytes`, `command` (argv list or null), `paths` (resolved paths), and
 `needs_sudo`. Each `skipped` entry has `name` and `reason` (`platform`,
-`missing_binary`, or `unavailable`). Sizes are integer bytes, or null when unknown.
+`missing_binary`, `unavailable`, `disabled`, or `not_configured`). Sizes are integer bytes, or null when unknown.
 {_JSON_ERRORS}"""
 
 _STATUS_VALUES = ", ".join(f"`{status.value}`" for status in Status)
