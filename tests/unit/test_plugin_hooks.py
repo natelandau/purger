@@ -14,7 +14,6 @@ from pytest_mock import MockerFixture
 from purger.output import is_partial
 from purger.plugin import Plugin
 from purger.plugins import (
-    ansible,
     apt,
     brew,
     bun,
@@ -576,24 +575,6 @@ def test_rip2_measures_printed_graveyard(tmp_path: Path, mocker: MockerFixture) 
     assert report.footprint_bytes == disk_usage([tmp_path])
 
 
-@pytest.mark.parametrize("leftover", [True, False], ids=["leftovers", "nothing-to-clean"])
-def test_ansible_available_only_with_leftovers(
-    leftover: bool, tmp_path: Path, mocker: MockerFixture
-) -> None:
-    """Verify the plugin applies only with leftovers to clean."""
-    # Given
-    if leftover:
-        stale = tmp_path / ".ansible" / "tmp" / "ansible-tmp-1747399837.59-86917-2270"
-        stale.mkdir(parents=True)
-    mocker.patch("purger.sizing.invoking_home", return_value=tmp_path)
-    mocker.patch.object(ansible, "_TMP_PATHS", ("~/.ansible/tmp/*",))
-    mocker.patch.object(ansible, "_GALAXY_PATHS", ("~/.ansible/galaxy_cache/*",))
-    assert ansible.PLUGIN.is_available is not None
-
-    # When / Then
-    assert ansible.PLUGIN.is_available() is leftover
-
-
 _PY = "/usr/bin/python3"
 _NODE = "/opt/homebrew/bin/node"
 _BREW = "/opt/homebrew/Library/Homebrew"
@@ -602,14 +583,6 @@ _BREW = "/opt/homebrew/Library/Homebrew"
 @pytest.mark.parametrize(
     ("plugin", "cmdline", "expected"),
     [
-        (ansible.PLUGIN, [_PY, "/Users/me/.local/bin/ansible-playbook", "site.yml"], True),
-        (ansible.PLUGIN, [_PY, "-sP", "/usr/bin/ansible-playbook", "site.yml"], True),
-        (ansible.PLUGIN, ["/opt/homebrew/bin/ansible", "all", "-m", "ping"], True),
-        (ansible.PLUGIN, ["ansible-galaxy", "install", "-r", "requirements.yml"], True),
-        (ansible.PLUGIN, [_PY, "/Users/me/.local/bin/purger", "clean", "ansible"], False),
-        (ansible.PLUGIN, ["vim", "/Users/me/.ansible/notes"], False),
-        (ansible.PLUGIN, [_PY, "/Users/me/.local/share/ansible/script.py"], False),
-        (ansible.PLUGIN, [], False),
         (brew.PLUGIN, ["/bin/bash", "-p", f"{_BREW}/brew.sh", "install", "jq"], True),
         (
             brew.PLUGIN,
@@ -655,28 +628,6 @@ def test_busy_process_matches_tool_runs(plugin: Plugin, cmdline: list[str], expe
 
     # When / Then
     assert plugin.busy_process(cmdline) is expected
-
-
-@pytest.mark.parametrize(
-    ("ansible_home", "expected"),
-    [
-        (None, ("~/.ansible",)),
-        ("", ("~/.ansible",)),
-        ("~/.ansible/", ("~/.ansible",)),
-        ("/Users/me/.local/share/ansible", ("~/.ansible", "/Users/me/.local/share/ansible")),
-    ],
-)
-def test_ansible_homes_follow_ansible_home(
-    ansible_home: str | None, expected: tuple[str, ...], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Verify an ANSIBLE_HOME is cleaned alongside the default, which is listed once."""
-    # Given
-    monkeypatch.delenv("ANSIBLE_HOME", raising=False)
-    if ansible_home is not None:
-        monkeypatch.setenv("ANSIBLE_HOME", ansible_home)
-
-    # When / Then
-    assert ansible._ansible_homes() == expected
 
 
 def test_pnpm_stale_metadata_dirs_keep_only_listed_cache_folders(tmp_path: Path) -> None:

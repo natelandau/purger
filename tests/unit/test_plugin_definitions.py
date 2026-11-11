@@ -19,7 +19,6 @@ def test_discover_plugins_finds_builtin_set() -> None:
 
     # Then
     assert names == {
-        "ansible",
         "apt",
         "brew",
         "bun",
@@ -135,8 +134,6 @@ _EXPECTED_ACTIONS: list[tuple[str, str, Tier, tuple[str, ...] | None]] = [
     ("podman", "system", Tier.CAUTION, ("podman", "system", "prune", "--all", "--force")),
     ("podman", "volumes", Tier.DANGEROUS, ("podman", "volume", "prune", "--force")),
     ("thumbnails", "cache", Tier.SAFE, None),
-    ("ansible", "galaxy-cache", Tier.SAFE, None),
-    ("ansible", "tmp", Tier.SAFE, None),
     ("apt", "autoclean", Tier.SAFE, ("apt-get", "autoclean")),
     ("apt", "clean", Tier.SAFE, ("apt-get", "clean")),
     ("brew", "cleanup", Tier.SAFE, ("brew", "cleanup", "--prune=all")),

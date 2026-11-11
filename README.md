@@ -8,7 +8,6 @@ Without `--dangerous` and your explicit confirmation, purger never deletes your 
 
 purger runs on macOS and Linux. Each supported tool is a plugin, and each plugin has one or more cleanup actions.
 
-- `ansible` (macOS, Linux): temp folders left by interrupted runs and the Galaxy cache, in `~/.ansible` and `$ANSIBLE_HOME`. Skipped while an ansible command runs.
 - `apt` (Linux): downloaded package files. Both actions run with sudo.
 - `brew` (macOS, Linux): old formula versions, the download cache, and dependencies that nothing needs anymore.
 - `bun` (macOS, Linux): packages unused for 30 days, or the entire cache with `--dangerous`.
