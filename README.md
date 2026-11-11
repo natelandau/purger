@@ -26,6 +26,7 @@ purger runs on macOS and Linux. Each supported tool is a plugin, and each plugin
 - `pacman` (Linux): cached package versions beyond the newest 3, and every cached version of uninstalled packages. Needs `paccache` from pacman-contrib, and runs with sudo.
 - `pip` (macOS, Linux): the download and wheel cache, even when pip is no longer installed.
 - `playwright` (macOS, Linux): browser builds older than the newest of each browser.
+- `poetry` (macOS, Linux): the package cache and the virtualenvs Poetry created, even when Poetry is no longer installed. Follows `POETRY_CACHE_DIR` and `POETRY_VIRTUALENVS_PATH`.
 - `pnpm` (macOS, Linux): store packages that no project uses, and registry metadata in formats the installed pnpm can no longer read.
 - `podman` (macOS, Linux): unused images, stopped containers, pods, networks, and build cache, and unused volumes with `--dangerous`.
 - `pre-commit` (macOS, Linux): unused hook repos, or the entire cache with `--dangerous`.
