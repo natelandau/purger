@@ -3,19 +3,28 @@
 import json
 import logging
 import re
-from functools import partial
+from collections.abc import Callable
 
-from nclutils.sh import ShellCommandError, run_command
+from purger.plugin import (
+    Action,
+    Plugin,
+    RiskLevel,
+    RunCommand,
+    SizeReportedByCommand,
+)
+from purger.runner import command_succeeds, probe_output
+from purger.sizing import nonblank_lines, parse_human_size
 
-from purger.plugin import Action, Plugin, Tier
-from purger.runner import command_succeeds
-from purger.sizing import parse_human_size
-
-_DF_CMD = ("docker", "system", "df", "--format", "json")
+DOCKER_DISK_USAGE_COMMAND = ("docker", "system", "df", "--format", "json")
 _PERCENT_SUFFIX = re.compile(r"\s*\(\d+(?:\.\d+)?%\)\s*$")
 
-_REMOVABLE = frozenset({"Images", "Containers", "Build Cache"})
-_CONTEXT_HOST_CMD = ("docker", "context", "inspect", "--format", "{{.Endpoints.docker.Host}}")
+_DOCKER_CONTEXT_HOST_COMMAND = (
+    "docker",
+    "context",
+    "inspect",
+    "--format",
+    "{{.Endpoints.docker.Host}}",
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,19 +39,15 @@ def _engine_is_local() -> bool:
     Returns:
         bool: True when the endpoint is a `unix://` socket.
     """
-    try:
-        result = run_command(list(_CONTEXT_HOST_CMD), check=False, timeout=10)
-    except ShellCommandError as exc:
-        logger.debug("cannot read the docker context: %s", exc)
-        return False
-    host = result.stdout.strip()
-    if result.ok and host.startswith("unix://"):
+    output = probe_output(_DOCKER_CONTEXT_HOST_COMMAND, timeout=10)
+    host = None if output is None else output.strip()
+    if host is not None and host.startswith("unix://"):
         return True
     logger.debug("skipping docker: the active context's endpoint is not local: %r", host)
     return False
 
 
-def _is_available() -> bool:
+def docker_engine_is_local_and_running() -> bool:
     """Report whether a Docker engine on this machine answers.
 
     A remote engine is never available, so a prune cannot reach another host.
@@ -53,7 +58,7 @@ def _is_available() -> bool:
     return _engine_is_local() and command_succeeds(["docker", "info"], timeout=10)
 
 
-def _reclaimable_from(output: str, types: frozenset[str]) -> int:
+def reclaimable_bytes_of(output: str, types: frozenset[str]) -> int:
     """Sum the reclaimable bytes of the given `docker system df` types.
 
     Args:
@@ -64,50 +69,74 @@ def _reclaimable_from(output: str, types: frozenset[str]) -> int:
         int: Total reclaimable bytes.
     """
     total = 0
-    for line in output.splitlines():
-        if not line.strip():
-            continue
+    for line in nonblank_lines(output):
         row = json.loads(line)
         if row.get("Type") in types:
             total += parse_human_size(_PERCENT_SUFFIX.sub("", row["Reclaimable"]))
     return total
 
 
+def sum_reclaimable_bytes(*types: str) -> Callable[[str], int]:
+    """Build a size reader that sums the reclaimable bytes of the given row types.
+
+    Args:
+        *types: Row types to include, such as `Images` or `Build Cache`.
+    """
+    row_types = frozenset(types)
+
+    def read_reclaimable_bytes(output: str) -> int:
+        return reclaimable_bytes_of(output, row_types)
+
+    return read_reclaimable_bytes
+
+
+# The total size and the system action read the same rows, so their sizes agree.
+system_prune_reclaimable_bytes = sum_reclaimable_bytes("Images", "Containers", "Build Cache")
+
+
 PLUGIN = Plugin(
     name="docker",
     description="Docker images, containers, build cache, and volumes",
-    requires="docker",
-    is_available=_is_available,
-    size_cmd=_DF_CMD,
-    parse_size=partial(_reclaimable_from, types=_REMOVABLE),
+    requires_on_path="docker",
+    skip_unless=docker_engine_is_local_and_running,
+    total_size=SizeReportedByCommand(
+        DOCKER_DISK_USAGE_COMMAND,
+        read_size=system_prune_reclaimable_bytes,
+    ),
     actions=(
         Action(
             name="builder",
-            tier=Tier.SAFE,
-            help="Remove the build cache. Builds run slower once, then recover.",
-            command=("docker", "builder", "prune", "--all", "--force"),
-            size_cmd=_DF_CMD,
-            parse_size=partial(_reclaimable_from, types=frozenset({"Build Cache"})),
+            risk_level=RiskLevel.SAFE,
+            description="Remove the build cache. Builds run slower once, then recover.",
+            cleanup=RunCommand("docker", "builder", "prune", "--all", "--force"),
+            size=SizeReportedByCommand(
+                DOCKER_DISK_USAGE_COMMAND,
+                read_size=sum_reclaimable_bytes("Build Cache"),
+            ),
         ),
         Action(
             name="system",
-            tier=Tier.CAUTION,
-            help=(
+            risk_level=RiskLevel.CAUTION,
+            description=(
                 "Remove all unused images, stopped containers, unused networks, and build cache. "
                 "Images must be pulled again before next use."
             ),
-            command=("docker", "system", "prune", "--all", "--force"),
-            size_cmd=_DF_CMD,
-            parse_size=partial(_reclaimable_from, types=_REMOVABLE),
+            cleanup=RunCommand("docker", "system", "prune", "--all", "--force"),
+            size=SizeReportedByCommand(
+                DOCKER_DISK_USAGE_COMMAND,
+                read_size=system_prune_reclaimable_bytes,
+            ),
         ),
         Action(
             name="volumes",
-            tier=Tier.DANGEROUS,
-            help="Remove all unused volumes. Volume data such as databases is lost permanently.",
-            command=("docker", "volume", "prune", "--all", "--force"),
-            size_cmd=_DF_CMD,
-            parse_size=partial(_reclaimable_from, types=frozenset({"Local Volumes"})),
-            outside_footprint=True,
+            risk_level=RiskLevel.DANGEROUS,
+            description="Remove all unused volumes. Volume data such as databases is lost permanently.",
+            cleanup=RunCommand("docker", "volume", "prune", "--all", "--force"),
+            size=SizeReportedByCommand(
+                DOCKER_DISK_USAGE_COMMAND,
+                read_size=sum_reclaimable_bytes("Local Volumes"),
+            ),
+            adds_to_plugin_total_size=True,
         ),
     ),
 )

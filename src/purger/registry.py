@@ -15,7 +15,7 @@ import psutil
 from nclutils.sh import which
 
 from purger import plugins as _builtin_plugins
-from purger.plugin import Plugin
+from purger.plugin import Plugin, PluginSettings
 from purger.reports import SkippedPlugin, SkipReason
 
 logger = logging.getLogger(__name__)
@@ -130,10 +130,10 @@ def is_busy(plugin: Plugin, *, processes: ProcessTable | None = None) -> bool:
         bool: True when a matching process runs outside purger, or when the
             check fails, so no cleanup runs blind.
     """
-    if plugin.busy_process is None:
+    if plugin.skip_while_running is None:
         return False
     try:
-        return (processes or ProcessTable()).running(plugin.busy_process)
+        return (processes or ProcessTable()).running(plugin.skip_while_running)
     except Exception as exc:  # noqa: BLE001
         # Plugin-supplied code and the process scan must not abort the whole run.
         logger.debug("busy check for %s failed: %s", plugin.name, exc)
@@ -146,17 +146,17 @@ def skip_reason(
     """Return why a plugin does not apply to this machine, or None if it does.
 
     Checks run cheapest first: platform, required binary, the plugin's
-    availability hook, then a scan for a running copy of its tool.
+    `skip_unless` check, then a scan for a running copy of its tool.
 
     Args:
         plugin: Plugin to check.
-        check_available: Run the availability hook and the process scan.
+        check_available: Run the `skip_unless` check and the process scan.
             Disable to avoid their cost.
         processes: A process table shared across plugins. Defaults to a fresh one.
     """
-    if sys.platform not in plugin.platforms:
+    if sys.platform not in {system.value for system in plugin.operating_systems}:
         return SkipReason.PLATFORM
-    if plugin.requires is not None and which(plugin.requires) is None:
+    if plugin.requires_on_path is not None and which(plugin.requires_on_path) is None:
         return SkipReason.MISSING_BINARY
     if not check_available:
         return None
@@ -166,14 +166,42 @@ def skip_reason(
 
 
 def _available(plugin: Plugin) -> bool:
-    """Report whether the plugin's own availability hook passes."""
-    if plugin.is_available is None:
+    """Report whether the plugin's own `skip_unless` check passes."""
+    if plugin.skip_unless is None:
         return True
     try:
-        return plugin.is_available()
+        return plugin.skip_unless()
     except Exception as exc:  # noqa: BLE001
         # Plugin-supplied code must not abort the whole run.
-        logger.debug("is_available for %s failed: %s", plugin.name, exc)
+        logger.debug("skip_unless for %s failed: %s", plugin.name, exc)
+        return False
+
+
+def _is_blank(value: object) -> bool:
+    """Report whether a setting value is empty, counting whitespace-only text as empty."""
+    return value == () or (isinstance(value, str) and not value.strip())
+
+
+def is_configured(plugin: Plugin, settings: PluginSettings) -> bool:
+    """Report whether the plugin has the settings it needs to run.
+
+    Args:
+        plugin: Plugin to check.
+        settings: The plugin's resolved settings for this run.
+
+    Returns:
+        bool: False when a required setting is empty or blank, or the plugin's
+            `skip_unless_configured` hook returns False or raises.
+    """
+    if any(item.required and _is_blank(settings.value(item.name)) for item in plugin.settings):
+        return False
+    if plugin.skip_unless_configured is None:
+        return True
+    try:
+        return plugin.skip_unless_configured(settings)
+    except Exception as exc:  # noqa: BLE001
+        # Plugin-supplied code must not abort the whole run.
+        logger.warning("configuration check for %s failed: %s", plugin.name, exc)
         return False
 
 

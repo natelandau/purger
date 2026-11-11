@@ -4,9 +4,17 @@ from pathlib import Path
 
 from nclutils.sh import run_command
 
-from purger.plugin import Action, Plugin, Tier
-from purger.plugins._shared import program_matcher
-from purger.sizing import SIZE_CMD_TIMEOUT_SECONDS, disk_usage, printed_dir_usage
+from purger.plugin import (
+    Action,
+    Plugin,
+    RiskLevel,
+    RunCommand,
+    SizeComputedBy,
+    SizeOfDirectoryPrintedBy,
+    SizeUnknown,
+    program_matching,
+)
+from purger.sizing import SIZE_COMMAND_TIMEOUT_SECONDS, disk_usage, nonblank_lines
 
 
 def _stale_metadata_dirs(output: str, cache_dir: Path) -> list[Path]:
@@ -23,21 +31,21 @@ def _stale_metadata_dirs(output: str, cache_dir: Path) -> list[Path]:
         list[Path]: Directories inside the cache that a prune would delete.
     """
     root = cache_dir.resolve()
-    candidates = ((root / line.strip()).resolve() for line in output.splitlines() if line.strip())
+    candidates = ((root / line).resolve() for line in nonblank_lines(output))
     return [path for path in candidates if path.is_relative_to(root) and path.is_dir()]
 
 
-def _stale_metadata_size() -> int:
+def stale_metadata_size() -> int:
     """Measure the metadata cache folders this pnpm version can no longer read.
 
     Returns:
         int: Allocated bytes of the folders `pnpm cache prune` would delete.
     """
     cache_dir = Path(
-        run_command(["pnpm", "cache", "path"], timeout=SIZE_CMD_TIMEOUT_SECONDS).stdout.strip()
+        run_command(["pnpm", "cache", "path"], timeout=SIZE_COMMAND_TIMEOUT_SECONDS).stdout.strip()
     )
     output = run_command(
-        ["pnpm", "cache", "prune", "--dry-run"], timeout=SIZE_CMD_TIMEOUT_SECONDS
+        ["pnpm", "cache", "prune", "--dry-run"], timeout=SIZE_COMMAND_TIMEOUT_SECONDS
     ).stdout
     return disk_usage(_stale_metadata_dirs(output, cache_dir=cache_dir))
 
@@ -45,32 +53,32 @@ def _stale_metadata_size() -> int:
 PLUGIN = Plugin(
     name="pnpm",
     description="pnpm package store and outdated registry metadata",
-    requires="pnpm",
-    size_cmd=("pnpm", "store", "path"),
-    parse_size=printed_dir_usage,
+    requires_on_path="pnpm",
+    total_size=SizeOfDirectoryPrintedBy(("pnpm", "store", "path")),
     # Package scripts such as `pnpm run dev` can run for hours and leave the store alone.
-    busy_process=program_matcher(
+    skip_while_running=program_matching(
         r"pnp[mx](\.c?js)?",
-        ignore_subcommands=frozenset({"run", "run-script", "exec", "start", "test", "t"}),
+        ignoring_subcommands=frozenset({"run", "run-script", "exec", "start", "test", "t"}),
     ),
     actions=(
         Action(
             name="prune",
-            tier=Tier.SAFE,
-            help="Remove packages that no project on this machine references.",
-            command=("pnpm", "store", "prune"),
+            risk_level=RiskLevel.SAFE,
+            description="Remove packages that no project on this machine references.",
+            cleanup=RunCommand("pnpm", "store", "prune"),
+            size=SizeUnknown(reason="pnpm cannot preview which packages store prune removes"),
         ),
         Action(
             name="metadata-prune",
-            tier=Tier.SAFE,
-            help=(
+            risk_level=RiskLevel.SAFE,
+            description=(
                 "Remove registry metadata in formats this pnpm can no longer read. "
                 "Projects pinned to an older pnpm fetch it again."
             ),
-            command=("pnpm", "cache", "prune", "--yes"),
-            size=_stale_metadata_size,
-            # The metadata cache lives outside the store that the footprint measures.
-            outside_footprint=True,
+            cleanup=RunCommand("pnpm", "cache", "prune", "--yes"),
+            size=SizeComputedBy(stale_metadata_size),
+            # The metadata cache lives outside the store that the total size measures.
+            adds_to_plugin_total_size=True,
         ),
     ),
 )

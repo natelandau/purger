@@ -29,7 +29,7 @@ def test_bun_available_only_with_cache_prune(
     )
 
     # When / Then
-    assert bun._is_available() is expected
+    assert bun.bun_supports_cache_prune() is expected
 
 
 def test_bun_unavailable_when_version_cannot_run(mocker: MockerFixture) -> None:
@@ -42,4 +42,4 @@ def test_bun_unavailable_when_version_cannot_run(mocker: MockerFixture) -> None:
     )
 
     # When / Then
-    assert bun._is_available() is False
+    assert bun.bun_supports_cache_prune() is False

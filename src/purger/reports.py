@@ -1,11 +1,11 @@
 """Report types describing what purger measured and did."""
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
-from purger.plugin import Action, Detail, Plugin
+from purger.plugin import Action, Plugin, PluginSettings, SizeBreakdownRow
 
 
 class Status(StrEnum):
@@ -38,23 +38,23 @@ class ActionReport:
     resolved_paths: list[Path]
     status: Status | None = None
     error: str | None = None
-    details: list[Detail] = field(default_factory=list)
+    details: list[SizeBreakdownRow] = field(default_factory=list)
 
 
-@dataclass
+@dataclass(kw_only=True)
 class PluginReport:
-    """Measured footprint of one plugin and the reports of its actions.
+    """Measured total size of one plugin and the reports of its actions.
 
-    `prepared_paths` holds what the plugin's `prepare` hook returned for this
-    run, so re-measuring after a cleanup compares the same paths.
+    `settings` holds the plugin's settings for this run, so re-measuring after
+    a cleanup sizes the plugin the same way.
     """
 
     plugin: Plugin
-    footprint_bytes: int | None
+    total_size_bytes: int | None
     actions: list[ActionReport]
+    settings: PluginSettings
     freed_bytes: int | None = None
     after_bytes: int | None = None
-    prepared_paths: Mapping[str, tuple[Path, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

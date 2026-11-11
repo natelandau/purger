@@ -19,4 +19,4 @@ from purger.plugins import pacman
 def test_pacman_reads_dry_run_savings(output: str, expected: int) -> None:
     """Verify the paccache dry-run summary converts to bytes, and no candidates means zero."""
     # Given / When / Then
-    assert pacman._saved_bytes(output) == expected
+    assert pacman.paccache_saved_bytes(output) == expected

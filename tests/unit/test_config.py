@@ -31,10 +31,16 @@ def _fake(name: str = "fake") -> Plugin:
     return make_plugin(
         name=name,
         settings=(
-            Setting(name="paths", kind="str_list", default=("~/p",), help="Paths."),
-            Setting(name="max_depth", kind="int", default=4, help="Depth.", check=_reject_big),
-            Setting(name="flag", kind="bool", default=False, help="Flag."),
-            Setting(name="label", kind="str", default="x", help="Label."),
+            Setting(name="paths", value_type=list[str], default=("~/p",), description="Paths."),
+            Setting(
+                name="max_depth",
+                value_type=int,
+                default=4,
+                description="Depth.",
+                validate=_reject_big,
+            ),
+            Setting(name="flag", value_type=bool, default=False, description="Flag."),
+            Setting(name="label", value_type=str, default="x", description="Label."),
         ),
     )
 
@@ -195,13 +201,38 @@ def test_wrong_type_raises(
         load_config({"fake": fake}, env={"PURGER_CONFIG": str(path), **env})
 
 
-def test_setting_check_rejects_value(tmp_path: Path, fake: Plugin) -> None:
+def test_setting_validate_rejects_value(tmp_path: Path, fake: Plugin) -> None:
     """Verify a failing setting check becomes a ConfigError."""
     # Given
     path = _write(tmp_path, "[plugins.fake]\nmax_depth = 99\n")
 
     # When / Then
     with pytest.raises(ConfigError, match="too big"):
+        load_config({"fake": fake}, env={"PURGER_CONFIG": str(path)})
+
+
+@pytest.mark.parametrize(
+    ("toml", "expected_message"),
+    [
+        (
+            '[plugins.fake]\npaths = "~/p"\n',
+            "is not valid for 'paths', expected a list of strings",
+        ),
+        (
+            '[plugins.fake]\nmax_depth = "deep"\n',
+            "is not valid for 'max_depth', expected an integer",
+        ),
+    ],
+)
+def test_wrong_type_error_names_the_expected_type(
+    tmp_path: Path, fake: Plugin, toml: str, expected_message: str
+) -> None:
+    """Verify the error for a wrong-typed value says what type was expected."""
+    # Given a config file with a value of the wrong type
+    path = _write(tmp_path, toml)
+
+    # When / Then
+    with pytest.raises(ConfigError, match=expected_message):
         load_config({"fake": fake}, env={"PURGER_CONFIG": str(path)})
 
 
@@ -272,7 +303,7 @@ def test_plugin_tables_must_be_tables(tmp_path: Path, fake: Plugin, toml: str, n
         load_config({"fake": fake}, env={"PURGER_CONFIG": str(path)})
 
 
-def test_check_rejects_env_value(tmp_path: Path, fake: Plugin) -> None:
+def test_validate_rejects_env_value(tmp_path: Path, fake: Plugin) -> None:
     """Verify a failing setting check on an environment value is a ConfigError."""
     # Given
     path = _write(tmp_path, "")
@@ -318,7 +349,7 @@ def test_settings_fall_back_to_defaults(fake: Plugin) -> None:
 
     # Then
     assert settings.value("max_depth") == 4
-    assert settings.str_list("paths") == ("~/p",)
+    assert settings.get_string_list("paths") == ("~/p",)
 
 
 def test_settings_reject_undeclared_name(fake: Plugin) -> None:
@@ -330,7 +361,7 @@ def test_settings_reject_undeclared_name(fake: Plugin) -> None:
     with pytest.raises(KeyError, match="declares no setting 'nope'"):
         settings.value("nope")
     with pytest.raises(KeyError):
-        settings.integer("nope")
+        settings.get_integer("nope")
 
 
 def test_configured_value_wins_over_default(fake: Plugin) -> None:
@@ -342,8 +373,8 @@ def test_configured_value_wins_over_default(fake: Plugin) -> None:
     settings = config.settings_for(fake)
 
     # Then
-    assert settings.integer("max_depth") == 7
-    assert settings.str_list("paths") == ("~/p",)
+    assert settings.get_integer("max_depth") == 7
+    assert settings.get_string_list("paths") == ("~/p",)
 
 
 def test_settings_ignore_other_plugins_values(fake: Plugin) -> None:
@@ -352,7 +383,7 @@ def test_settings_ignore_other_plugins_values(fake: Plugin) -> None:
     config = Config(values={"other": {"max_depth": 7}})
 
     # When / Then
-    assert config.settings_for(fake).integer("max_depth") == 4
+    assert config.settings_for(fake).get_integer("max_depth") == 4
 
 
 def test_typed_accessors_reject_wrong_kind(fake: Plugin) -> None:
@@ -362,9 +393,9 @@ def test_typed_accessors_reject_wrong_kind(fake: Plugin) -> None:
 
     # When / Then
     with pytest.raises(TypeError, match="is not an integer"):
-        settings.integer("label")
+        settings.get_integer("label")
     with pytest.raises(TypeError, match="is not a list of strings"):
-        settings.str_list("label")
+        settings.get_string_list("label")
 
 
 def test_resolved_settings_are_read_only(fake: Plugin) -> None:

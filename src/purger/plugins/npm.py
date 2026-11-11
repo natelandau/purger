@@ -1,15 +1,19 @@
 """Plugin for the npm package cache and npx cache."""
 
-from functools import partial
+from purger.plugin import (
+    Action,
+    Plugin,
+    RiskLevel,
+    RunCommand,
+    SizeOfDirectoryPrintedBy,
+    SizeUnknown,
+    program_matching,
+)
 
-from purger.plugin import Action, Plugin, Tier
-from purger.plugins._shared import program_matcher
-from purger.sizing import printed_dir_usage
-
-_CACHE_DIR_CMD = ("npm", "config", "get", "cache")
+NPM_CACHE_DIRECTORY_COMMAND = ("npm", "config", "get", "cache")
 
 
-def _explain_npx_failure(stderr: str) -> str | None:
+def explain_npx_failure(stderr: str) -> str | None:
     """Name the usual cause when npm cannot remove the npx cache directory.
 
     A running npx command (an MCP server or a status line, for example) can
@@ -34,16 +38,13 @@ def _explain_npx_failure(stderr: str) -> str | None:
 PLUGIN = Plugin(
     name="npm",
     description="npm package cache and npx cache",
-    requires="npm",
-    size_cmd=_CACHE_DIR_CMD,
-    # Only the parts purger can clean, so the two cleanups account for the whole footprint.
-    parse_size=partial(printed_dir_usage, patterns=("_cacache", "_npx")),
+    requires_on_path="npm",
     # npx, `npm exec`, and package scripts such as `npm run dev` often run for
     # hours as MCP servers, a status line, or a dev server, and leave the
     # package cache alone, so only other npm commands count.
-    busy_process=program_matcher(
+    skip_while_running=program_matching(
         r"npm(-cli\.js)?",
-        ignore_subcommands=frozenset(
+        ignoring_subcommands=frozenset(
             {
                 "exec",
                 "x",
@@ -60,29 +61,30 @@ PLUGIN = Plugin(
             }
         ),
     ),
+    # Only the parts purger can clean, so the two cleanups account for everything `total_size` measures.
+    total_size=SizeOfDirectoryPrintedBy(NPM_CACHE_DIRECTORY_COMMAND, subpaths=("_cacache", "_npx")),
     actions=(
         Action(
             name="verify",
-            tier=Tier.SAFE,
-            help="Garbage-collect cache data that is no longer needed and verify the rest.",
-            command=("npm", "cache", "verify"),
+            risk_level=RiskLevel.SAFE,
+            description="Garbage-collect cache data that is no longer needed and verify the rest.",
+            cleanup=RunCommand("npm", "cache", "verify"),
+            size=SizeUnknown(reason="npm cannot preview what cache verify removes"),
         ),
         Action(
             name="npx",
-            tier=Tier.SAFE,
-            help="Remove packages cached by npx. They download again on the next npx run.",
-            command=("npm", "cache", "npx", "rm", "--force"),
-            size_cmd=_CACHE_DIR_CMD,
-            parse_size=partial(printed_dir_usage, patterns=("_npx",)),
-            explain_failure=_explain_npx_failure,
+            risk_level=RiskLevel.SAFE,
+            description="Remove packages cached by npx. They download again on the next npx run.",
+            cleanup=RunCommand("npm", "cache", "npx", "rm", "--force"),
+            size=SizeOfDirectoryPrintedBy(NPM_CACHE_DIRECTORY_COMMAND, subpaths=("_npx",)),
+            explain_failure=explain_npx_failure,
         ),
         Action(
             name="clean",
-            tier=Tier.DANGEROUS,
-            help="Wipe the entire package cache. Every package is downloaded again on next install.",
-            command=("npm", "cache", "clean", "--force"),
-            size_cmd=_CACHE_DIR_CMD,
-            parse_size=partial(printed_dir_usage, patterns=("_cacache",)),
+            risk_level=RiskLevel.DANGEROUS,
+            description="Wipe the entire package cache. Every package is downloaded again on next install.",
+            cleanup=RunCommand("npm", "cache", "clean", "--force"),
+            size=SizeOfDirectoryPrintedBy(NPM_CACHE_DIRECTORY_COMMAND, subpaths=("_cacache",)),
         ),
     ),
 )

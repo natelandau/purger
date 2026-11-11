@@ -15,7 +15,7 @@ def test_trash_available_when_readable(tmp_path: Path, mocker: MockerFixture) ->
     mocker.patch("purger.plugins.trash.invoking_home", return_value=tmp_path)
 
     # When / Then
-    assert trash._is_available() is True
+    assert trash.trash_is_readable() is True
 
 
 def test_trash_available_when_missing(tmp_path: Path, mocker: MockerFixture) -> None:
@@ -24,7 +24,7 @@ def test_trash_available_when_missing(tmp_path: Path, mocker: MockerFixture) -> 
     mocker.patch("purger.plugins.trash.invoking_home", return_value=tmp_path)
 
     # When / Then
-    assert trash._is_available() is True
+    assert trash.trash_is_readable() is True
 
 
 def test_trash_unavailable_without_permission(tmp_path: Path, mocker: MockerFixture) -> None:
@@ -34,7 +34,7 @@ def test_trash_unavailable_without_permission(tmp_path: Path, mocker: MockerFixt
     mocker.patch.object(Path, "iterdir", side_effect=PermissionError)
 
     # When / Then
-    assert trash._is_available() is False
+    assert trash.trash_is_readable() is False
 
 
 @pytest.mark.parametrize(
@@ -68,10 +68,10 @@ def test_linux_trash_empties_contents_not_folders(
         monkeypatch.setenv("XDG_DATA_HOME", xdg_data_home)
 
     # When / Then
-    assert trash._trash_paths("linux") == expected
+    assert trash.trash_globs("linux") == expected
 
 
 def test_macos_trash_empties_home_trash() -> None:
     """Verify the macOS Trash is the home .Trash folder."""
     # Given / When / Then
-    assert trash._trash_paths("darwin") == ("~/.Trash/*",)
+    assert trash.trash_globs("darwin") == ("~/.Trash/*",)

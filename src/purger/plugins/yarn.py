@@ -1,11 +1,17 @@
 """Plugin for the Yarn global package caches."""
 
-from purger.plugin import Action, Plugin, Tier
-from purger.plugins._shared import env_dir, program_matcher
-from purger.sizing import expand_paths
+from purger.plugin import (
+    Action,
+    DeletePaths,
+    Plugin,
+    RiskLevel,
+    program_matching,
+    user_cache_folders,
+)
+from purger.sizing import any_path_exists
 
 
-def _cache_patterns() -> tuple[str, ...]:
+def yarn_cache_globs() -> tuple[str, ...]:
     """List the Yarn cache contents to delete, as glob-safe patterns.
 
     Covers the Yarn 1 cache on macOS and Linux, where it follows `XDG_CACHE_HOME`,
@@ -15,46 +21,39 @@ def _cache_patterns() -> tuple[str, ...]:
     Returns:
         tuple[str, ...]: Cache content patterns, without duplicates.
     """
-    xdg_cache = env_dir("XDG_CACHE_HOME", "~/.cache")
-    return tuple(
-        dict.fromkeys(
-            (
-                "~/Library/Caches/Yarn/*",
-                "~/.cache/yarn/*",
-                f"{xdg_cache}/yarn/*",
-                "~/.yarn/berry/cache/*",
-            )
-        )
+    yarn_classic_caches = (
+        f"{folder}/*" for folder in user_cache_folders("yarn", macos_folder_name="Yarn")
     )
+    return (*yarn_classic_caches, "~/.yarn/berry/cache/*")
 
 
-_CACHE_PATHS = _cache_patterns()
+YARN_CACHE_GLOBS = yarn_cache_globs()
 
 
-def _has_cache() -> bool:
+def yarn_cache_exists() -> bool:
     """Report whether a Yarn cache exists, since the plugin does not need yarn installed.
 
     Returns:
         bool: True when any cache path has contents.
     """
-    return bool(expand_paths(_CACHE_PATHS))
+    return any_path_exists(YARN_CACHE_GLOBS)
 
 
 PLUGIN = Plugin(
     name="yarn",
     description="Yarn global package cache",
-    is_available=_has_cache,
+    skip_unless=yarn_cache_exists,
     # Package scripts such as `yarn run dev` can run for hours and leave the cache alone.
-    busy_process=program_matcher(
+    skip_while_running=program_matching(
         r"yarn(\.c?js|-\d[\w.-]*\.cjs)?",
-        ignore_subcommands=frozenset({"run", "exec", "node"}),
+        ignoring_subcommands=frozenset({"run", "exec", "node"}),
     ),
     actions=(
         Action(
             name="cache",
-            tier=Tier.CAUTION,
-            help="Wipe the global Yarn cache. Packages download again on next install.",
-            paths=_CACHE_PATHS,
+            risk_level=RiskLevel.CAUTION,
+            description="Wipe the global Yarn cache. Packages download again on next install.",
+            cleanup=DeletePaths(*YARN_CACHE_GLOBS),
         ),
     ),
 )

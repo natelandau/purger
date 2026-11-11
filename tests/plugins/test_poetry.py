@@ -8,18 +8,18 @@ from pytest_mock import MockerFixture
 from purger.plugins import poetry
 
 
-def test_poetry_available_with_cache_or_virtualenvs(
+def test_poetry_runs_with_cache_or_virtualenvs(
     tmp_path: Path, mocker: MockerFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Verify Poetry applies when it left a cache or a virtualenv, without poetry installed."""
     # Given an empty home and no environment overrides pointing outside it
     for var in ("XDG_CACHE_HOME", "POETRY_CACHE_DIR", "POETRY_VIRTUALENVS_PATH"):
         monkeypatch.delenv(var, raising=False)
-    mocker.patch.object(poetry, "_CACHE_PATHS", poetry._cache_patterns())
-    mocker.patch.object(poetry, "_VIRTUALENV_PATHS", poetry._virtualenv_patterns())
+    mocker.patch.object(poetry, "POETRY_CACHE_GLOBS", poetry.poetry_cache_globs())
+    mocker.patch.object(poetry, "POETRY_VIRTUALENV_GLOBS", poetry.poetry_virtualenv_globs())
     mocker.patch("purger.sizing.invoking_home", return_value=tmp_path)
-    assert poetry.PLUGIN.is_available is not None
-    before = poetry.PLUGIN.is_available()
+    assert poetry.PLUGIN.skip_unless is not None
+    before = poetry.PLUGIN.skip_unless()
 
     # When a Linux-style virtualenv appears
     venv = tmp_path / ".cache" / "pypoetry" / "virtualenvs" / "app-abc123-py3.13"
@@ -27,7 +27,7 @@ def test_poetry_available_with_cache_or_virtualenvs(
 
     # Then
     assert before is False
-    assert poetry.PLUGIN.is_available() is True
+    assert poetry.PLUGIN.skip_unless() is True
 
 
 def test_poetry_cache_paths_follow_environment(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -37,7 +37,7 @@ def test_poetry_cache_paths_follow_environment(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv("XDG_CACHE_HOME", "/home/me/xdg")
 
     # When
-    patterns = poetry._cache_patterns()
+    patterns = poetry.poetry_cache_globs()
 
     # Then
     assert "/data/poetry/cache/*" in patterns
@@ -67,7 +67,7 @@ def test_poetry_virtualenv_paths_follow_environment(
         monkeypatch.setenv(key, value)
 
     # When
-    patterns = poetry._virtualenv_patterns()
+    patterns = poetry.poetry_virtualenv_globs()
 
     # Then
     assert patterns[0] == expected

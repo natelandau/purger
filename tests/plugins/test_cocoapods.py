@@ -26,4 +26,4 @@ def test_cocoapods_cache_dir(
         monkeypatch.setenv(name, value)
 
     # When / Then
-    assert cocoapods._cache_dir() == expected
+    assert cocoapods.cocoapods_cache_directory() == expected

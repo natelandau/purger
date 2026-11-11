@@ -1,37 +1,36 @@
 """Plugin for unused Flatpak runtimes and extensions."""
 
-from purger.plugin import Action, Plugin, Tier
+from purger.plugin import (
+    Action,
+    OperatingSystem,
+    Plugin,
+    RiskLevel,
+    RunCommand,
+    SizeUnknown,
+)
 
-_UNINSTALL_UNUSED = ("flatpak", "uninstall", "--unused", "-y", "--noninteractive")
-
-
-def _unknown_size() -> None:
-    """Report the footprint as unknown, since flatpak cannot preview what `--unused` removes.
-
-    Summing the two actions would also be unknown, but naming it here keeps the
-    footprint from looking like an oversight.
-    """
-
+UNINSTALL_UNUSED_COMMAND = ("flatpak", "uninstall", "--unused", "-y", "--noninteractive")
 
 PLUGIN = Plugin(
     name="flatpak",
     description="Flatpak runtimes and extensions no app uses",
-    platforms=frozenset({"linux"}),
-    requires="flatpak",
-    size=_unknown_size,
+    operating_systems=(OperatingSystem.LINUX,),
+    requires_on_path="flatpak",
+    total_size=SizeUnknown(reason="flatpak cannot preview what --unused removes"),
     actions=(
         Action(
             name="unused-user",
-            tier=Tier.SAFE,
-            help="Remove runtimes and extensions no app in your user installation uses.",
-            command=(*_UNINSTALL_UNUSED, "--user"),
+            risk_level=RiskLevel.SAFE,
+            description="Remove runtimes and extensions no app in your user installation uses.",
+            cleanup=RunCommand(*UNINSTALL_UNUSED_COMMAND, "--user"),
+            size=SizeUnknown(reason="flatpak cannot preview what --unused removes"),
         ),
         Action(
             name="unused-system",
-            tier=Tier.SAFE,
-            help="Remove runtimes and extensions no app in the system installation uses.",
-            command=(*_UNINSTALL_UNUSED, "--system"),
-            needs_sudo=True,
+            risk_level=RiskLevel.SAFE,
+            description="Remove runtimes and extensions no app in the system installation uses.",
+            cleanup=RunCommand(*UNINSTALL_UNUSED_COMMAND, "--system", with_sudo=True),
+            size=SizeUnknown(reason="flatpak cannot preview what --unused removes"),
         ),
     ),
 )

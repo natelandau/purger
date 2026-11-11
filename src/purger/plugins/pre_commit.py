@@ -1,23 +1,31 @@
 """Plugin for the pre-commit hook cache."""
 
-import os
 from pathlib import Path
 
-from purger.plugin import Action, Plugin, Tier
+from purger.plugin import (
+    Action,
+    Plugin,
+    RiskLevel,
+    RunCommand,
+    SizeComputedBy,
+    SizeUnknown,
+    folder_from_environment,
+)
 from purger.safety import invoking_home
 from purger.sizing import disk_usage
 
 
 def _cache_dir() -> Path:
     """Return the directory pre-commit stores hook repos in, following its own lookup order."""
-    if pre_commit_home := os.environ.get("PRE_COMMIT_HOME"):
-        return Path(pre_commit_home)
-    xdg_cache = os.environ.get("XDG_CACHE_HOME")
-    base = Path(xdg_cache) if xdg_cache else invoking_home() / ".cache"
-    return base / "pre-commit"
+    xdg_cache = folder_from_environment("XDG_CACHE_HOME", default="~/.cache")
+    folder = Path(folder_from_environment("PRE_COMMIT_HOME", default=f"{xdg_cache}/pre-commit"))
+    if folder.parts[0] == "~":
+        return invoking_home().joinpath(*folder.parts[1:])
+    # Resolves `~user` forms, which `invoking_home` does not cover.
+    return folder.expanduser()
 
 
-def _cache_size() -> int:
+def pre_commit_cache_size() -> int:
     """Measure the pre-commit cache.
 
     Returns:
@@ -29,21 +37,22 @@ def _cache_size() -> int:
 PLUGIN = Plugin(
     name="pre-commit",
     description="pre-commit hook environments and repos",
-    requires="pre-commit",
-    size=_cache_size,
+    requires_on_path="pre-commit",
+    total_size=SizeComputedBy(pre_commit_cache_size),
     actions=(
         Action(
             name="gc",
-            tier=Tier.SAFE,
-            help="Remove hook repos no longer referenced by any config.",
-            command=("pre-commit", "gc"),
+            risk_level=RiskLevel.SAFE,
+            description="Remove hook repos no longer referenced by any config.",
+            cleanup=RunCommand("pre-commit", "gc"),
+            size=SizeUnknown(reason="pre-commit cannot preview which repos gc removes"),
         ),
         Action(
             name="clean",
-            tier=Tier.DANGEROUS,
-            help="Wipe the entire pre-commit cache. Hook environments are reinstalled on next run.",
-            command=("pre-commit", "clean"),
-            size=_cache_size,
+            risk_level=RiskLevel.DANGEROUS,
+            description="Wipe the entire pre-commit cache. Hook environments are reinstalled on next run.",
+            cleanup=RunCommand("pre-commit", "clean"),
+            size=SizeComputedBy(pre_commit_cache_size),
         ),
     ),
 )

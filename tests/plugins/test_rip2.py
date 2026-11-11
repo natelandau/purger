@@ -23,7 +23,7 @@ _OLD_RIP_HELP = "rip: a safe and ergonomic alternative to rm\n    -d, --decompos
     [(0, _RIP2_HELP, True), (0, _OLD_RIP_HELP, False), (1, _RIP2_HELP, False)],
     ids=["rip2", "old-rip", "help-fails"],
 )
-def test_rip2_available_only_for_rip2(
+def test_rip2_runs_only_for_rip2(
     returncode: int, stdout: str, expected: bool, mocker: MockerFixture
 ) -> None:
     """Verify the plugin applies only when `rip` is rip2, since the original rip would bury a file named graveyard."""
@@ -33,14 +33,14 @@ def test_rip2_available_only_for_rip2(
         autospec=True,
         return_value=make_completed(returncode=returncode, stdout=stdout),
     )
-    assert rip2.PLUGIN.is_available is not None
+    assert rip2.PLUGIN.skip_unless is not None
 
     # When / Then
-    assert rip2.PLUGIN.is_available() is expected
+    assert rip2.PLUGIN.skip_unless() is expected
 
 
 def test_rip2_measures_printed_graveyard(tmp_path: Path, mocker: MockerFixture) -> None:
-    """Verify the footprint is the size of the directory `rip graveyard` prints."""
+    """Verify the total size is the size of the directory `rip graveyard` prints."""
     # Given
     (tmp_path / "buried").write_bytes(b"x" * 10_000)
     mocker.patch(
@@ -55,4 +55,4 @@ def test_rip2_measures_printed_graveyard(tmp_path: Path, mocker: MockerFixture) 
     )
 
     # Then
-    assert report.footprint_bytes == disk_usage([tmp_path])
+    assert report.total_size_bytes == disk_usage([tmp_path])

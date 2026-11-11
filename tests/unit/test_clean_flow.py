@@ -8,9 +8,12 @@ from nclutils.strings import human_size
 from pytest_mock import MockerFixture
 
 from purger.clean_flow import CleanOptions, plan_clean, risky_prompt, safe_prompt
-from purger.plugin import Tier
+from purger.plugin import (
+    RiskLevel,
+    RunCommand,
+)
 from purger.reports import ActionReport, PluginReport, Status
-from tests.conftest import make_action, make_plugin
+from tests.conftest import EMPTY_SETTINGS, make_action, make_plugin
 
 
 class FakeConfirm:
@@ -34,19 +37,21 @@ class _Extra(TypedDict, total=False):
 
 def _report(
     plugin_name: str = "p",
-    footprint: int | None = 100,
-    **actions: tuple[Tier, _Extra],
+    total_size: int | None = 100,
+    **actions: tuple[RiskLevel, _Extra],
 ) -> PluginReport:
     reports = [
         ActionReport(
-            action=make_action(name=name, tier=tier, **extra.get("action", {})),
+            action=make_action(name=name, risk_level=risk_level, **extra.get("action", {})),
             size_bytes=extra.get("size", 10),
             resolved_paths=[Path("/x")],
         )
-        for name, (tier, extra) in actions.items()
+        for name, (risk_level, extra) in actions.items()
     ]
     plugin = make_plugin(name=plugin_name, actions=tuple(r.action for r in reports))
-    return PluginReport(plugin=plugin, footprint_bytes=footprint, actions=reports)
+    return PluginReport(
+        settings=EMPTY_SETTINGS, plugin=plugin, total_size_bytes=total_size, actions=reports
+    )
 
 
 def _run(
@@ -64,7 +69,7 @@ def _run(
 def test_plan_clean_yes_never_approves_risky() -> None:
     """Verify --yes in a non-interactive run declines CAUTION and DANGEROUS actions."""
     # Given caution and dangerous actions
-    rep = _report(c=(Tier.CAUTION, {}), d=(Tier.DANGEROUS, {}))
+    rep = _report(c=(RiskLevel.CAUTION, {}), d=(RiskLevel.DANGEROUS, {}))
 
     # When run with yes, non-interactive, dangerous allowed
     approved, confirm = _run([rep], yes=True, interactive=False, dangerous=True)
@@ -78,7 +83,7 @@ def test_plan_clean_yes_never_approves_risky() -> None:
 def test_plan_clean_yes_skips_only_safe_prompt() -> None:
     """Verify --yes skips the SAFE prompt but still asks about CAUTION."""
     # Given one safe and one caution action
-    rep = _report(s=(Tier.SAFE, {}), c=(Tier.CAUTION, {}))
+    rep = _report(s=(RiskLevel.SAFE, {}), c=(RiskLevel.CAUTION, {}))
 
     # When run with yes and interactive
     approved, confirm = _run([rep], FakeConfirm([True]), yes=True, interactive=True)
@@ -92,7 +97,7 @@ def test_plan_clean_yes_skips_only_safe_prompt() -> None:
 def test_plan_clean_safe_single_prompt() -> None:
     """Verify three SAFE actions yield one prompt and a no declines all."""
     # Given three safe actions
-    rep = _report(a=(Tier.SAFE, {}), b=(Tier.SAFE, {}), c=(Tier.SAFE, {}))
+    rep = _report(a=(RiskLevel.SAFE, {}), b=(RiskLevel.SAFE, {}), c=(RiskLevel.SAFE, {}))
 
     # When the user answers no
     approved, confirm = _run([rep], FakeConfirm([False]), interactive=True)
@@ -106,7 +111,7 @@ def test_plan_clean_safe_single_prompt() -> None:
 def test_plan_clean_false_answer_declines_caution() -> None:
     """Verify a False answer (including a cancelled prompt) declines CAUTION."""
     # Given a caution action
-    rep = _report(c=(Tier.CAUTION, {}))
+    rep = _report(c=(RiskLevel.CAUTION, {}))
 
     # When answered False
     approved, _ = _run([rep], FakeConfirm([False]), interactive=True)
@@ -120,7 +125,7 @@ def test_plan_clean_false_answer_declines_caution() -> None:
 def test_plan_clean_non_interactive_sudo(sudo: bool, expected: Status | None) -> None:
     """Verify a SAFE sudo action runs non-interactively only when sudo is ready."""
     # Given a safe sudo action
-    rep = _report(s=(Tier.SAFE, {"action": {"needs_sudo": True}}))
+    rep = _report(s=(RiskLevel.SAFE, {"action": {"cleanup": RunCommand("tool", with_sudo=True)}}))
 
     # When run with yes, non-interactive
     approved, _ = _run([rep], sudo=sudo, yes=True, interactive=False)
@@ -134,8 +139,8 @@ def test_plan_clean_sudo_ready_called_at_most_once(mocker: MockerFixture) -> Non
     """Verify sudo_ready is called once however many sudo actions exist."""
     # Given two sudo actions
     rep = _report(
-        a=(Tier.SAFE, {"action": {"needs_sudo": True}}),
-        b=(Tier.SAFE, {"action": {"needs_sudo": True}}),
+        a=(RiskLevel.SAFE, {"action": {"cleanup": RunCommand("tool", with_sudo=True)}}),
+        b=(RiskLevel.SAFE, {"action": {"cleanup": RunCommand("tool", with_sudo=True)}}),
     )
     sudo_ready = mocker.Mock(return_value=True)
 
@@ -154,7 +159,7 @@ def test_plan_clean_sudo_ready_called_at_most_once(mocker: MockerFixture) -> Non
 def test_plan_clean_sudo_not_checked_without_need(mocker: MockerFixture) -> None:
     """Verify sudo_ready is not called when no SAFE sudo action needs it."""
     # Given a plain action
-    rep = _report(a=(Tier.SAFE, {}))
+    rep = _report(a=(RiskLevel.SAFE, {}))
     sudo_ready = mocker.Mock(return_value=True)
 
     # When planned non-interactively
@@ -172,7 +177,7 @@ def test_plan_clean_sudo_not_checked_without_need(mocker: MockerFixture) -> None
 def test_plan_clean_non_interactive_without_yes_declines_safe() -> None:
     """Verify a non-interactive run without --yes declines SAFE actions."""
     # Given a safe action
-    rep = _report(a=(Tier.SAFE, {}))
+    rep = _report(a=(RiskLevel.SAFE, {}))
 
     # When run non-interactively without yes
     approved, confirm = _run([rep], interactive=False)
@@ -184,10 +189,10 @@ def test_plan_clean_non_interactive_without_yes_declines_safe() -> None:
 
 
 def test_plan_clean_nothing_to_clean() -> None:
-    """Verify zero-size actions and unsized actions of zero-footprint plugins are not prompted."""
-    # Given a zero-size action and an unsized action in a zero-footprint plugin
-    rep = _report(a=(Tier.SAFE, {"size": 0}))
-    rep2 = _report("q", footprint=0, b=(Tier.CAUTION, {"size": None}))
+    """Verify zero-size actions and unsized actions of plugins with a zero total size are not prompted."""
+    # Given a zero-size action and an unsized action in a plugin with a zero total size
+    rep = _report(a=(RiskLevel.SAFE, {"size": 0}))
+    rep2 = _report("q", total_size=0, b=(RiskLevel.CAUTION, {"size": None}))
 
     # When planned
     approved, confirm = _run([rep, rep2], interactive=True)
@@ -199,10 +204,10 @@ def test_plan_clean_nothing_to_clean() -> None:
     assert confirm.prompts == []
 
 
-def test_plan_clean_known_size_beats_zero_footprint() -> None:
-    """Verify an action with a known non-zero size is offered even when the footprint is zero."""
-    # Given a zero-footprint plugin whose action measures its own data
-    rep = _report(footprint=0, v=(Tier.CAUTION, {"size": 2_000}))
+def test_plan_clean_known_size_beats_zero_total_size() -> None:
+    """Verify an action with a known non-zero size is offered even when the total size is zero."""
+    # Given a plugin with a zero total size whose action measures its own data
+    rep = _report(total_size=0, v=(RiskLevel.CAUTION, {"size": 2_000}))
 
     # When planned interactively and approved
     approved, confirm = _run([rep], FakeConfirm([True]), interactive=True)
@@ -215,7 +220,7 @@ def test_plan_clean_known_size_beats_zero_footprint() -> None:
 def test_plan_clean_dangerous_without_flag_declined() -> None:
     """Verify DANGEROUS actions are declined when --dangerous is absent."""
     # Given a dangerous action
-    rep = _report(d=(Tier.DANGEROUS, {}))
+    rep = _report(d=(RiskLevel.DANGEROUS, {}))
 
     # When run interactively without dangerous
     approved, confirm = _run([rep], FakeConfirm([True]), interactive=True)
@@ -229,7 +234,9 @@ def test_plan_clean_dangerous_without_flag_declined() -> None:
 def test_plan_clean_dry_run_plans_everything() -> None:
     """Verify dry run marks non-empty actions PLANNED and never prompts."""
     # Given mixed actions
-    rep = _report(s=(Tier.SAFE, {}), c=(Tier.CAUTION, {}), z=(Tier.SAFE, {"size": 0}))
+    rep = _report(
+        s=(RiskLevel.SAFE, {}), c=(RiskLevel.CAUTION, {}), z=(RiskLevel.SAFE, {"size": 0})
+    )
 
     # When dry run
     approved, confirm = _run([rep], dry_run=True, yes=True)
@@ -247,8 +254,8 @@ def test_plan_clean_dry_run_plans_everything() -> None:
 def test_plan_clean_returns_plugin_order() -> None:
     """Verify approved actions come back in plugin order, not prompt order."""
     # Given a caution action before a safe action, across two plugins
-    rep1 = _report("one", c=(Tier.CAUTION, {}), s=(Tier.SAFE, {}))
-    rep2 = _report("two", s=(Tier.SAFE, {}))
+    rep1 = _report("one", c=(RiskLevel.CAUTION, {}), s=(RiskLevel.SAFE, {}))
+    rep2 = _report("two", s=(RiskLevel.SAFE, {}))
 
     # When everything is approved
     approved, confirm = _run(
@@ -275,12 +282,12 @@ def test_plan_clean_every_action_resolved() -> None:
     # Given a mixed scenario
     rep1 = _report(
         "one",
-        s=(Tier.SAFE, {}),
-        c=(Tier.CAUTION, {}),
-        d=(Tier.DANGEROUS, {}),
-        z=(Tier.SAFE, {"size": 0}),
+        s=(RiskLevel.SAFE, {}),
+        c=(RiskLevel.CAUTION, {}),
+        d=(RiskLevel.DANGEROUS, {}),
+        z=(RiskLevel.SAFE, {"size": 0}),
     )
-    rep2 = _report("two", footprint=0, s=(Tier.SAFE, {}))
+    rep2 = _report("two", total_size=0, s=(RiskLevel.SAFE, {}))
 
     # When planned with the caution refused
     approved, _ = _run([rep1, rep2], FakeConfirm([True, False]), interactive=True)
@@ -311,7 +318,9 @@ def test_safe_prompt_names_sudo_tools() -> None:
     """Verify the SAFE prompt marks exactly the tools with an action that runs with sudo."""
     # Given a tool with a sudo action and a tool without one, sizes unknown
     a = ActionReport(
-        action=make_action(name="a", needs_sudo=True), size_bytes=None, resolved_paths=[]
+        action=make_action(name="a", cleanup=RunCommand("tool", with_sudo=True)),
+        size_bytes=None,
+        resolved_paths=[],
     )
     b = ActionReport(action=make_action(name="b"), size_bytes=None, resolved_paths=[])
 
@@ -337,20 +346,20 @@ def test_safe_prompt_names_tools_once() -> None:
 
 
 def test_risky_prompt_text() -> None:
-    """Verify risky prompts show help and warn for DANGEROUS actions."""
+    """Verify risky prompts show the description and warn for DANGEROUS actions."""
     # Given caution and dangerous actions
     c = ActionReport(
-        action=make_action(name="c", tier=Tier.CAUTION, help="Drops stuff"),
+        action=make_action(name="c", risk_level=RiskLevel.CAUTION, description="Drops stuff"),
         size_bytes=5,
         resolved_paths=[],
     )
     d = ActionReport(
-        action=make_action(name="d", tier=Tier.DANGEROUS, help="Nukes stuff"),
+        action=make_action(name="d", risk_level=RiskLevel.DANGEROUS, description="Nukes stuff"),
         size_bytes=None,
         resolved_paths=[],
     )
 
-    # When built / Then help and warning appear
+    # When built / Then description and warning appear
     assert "Drops stuff" in risky_prompt("p", c)
     assert "may permanently delete data" not in risky_prompt("p", c)
     assert "Nukes stuff" in risky_prompt("p", d)
@@ -360,7 +369,7 @@ def test_risky_prompt_text() -> None:
 def test_plan_clean_yes_interactive_still_asks_dangerous() -> None:
     """Verify --yes in an interactive run still asks about DANGEROUS and declines on No."""
     # Given a safe and a dangerous action with --dangerous
-    rep = _report(s=(Tier.SAFE, {}), d=(Tier.DANGEROUS, {}))
+    rep = _report(s=(RiskLevel.SAFE, {}), d=(RiskLevel.DANGEROUS, {}))
 
     # When run with yes and interactive, answering No to the dangerous prompt
     approved, confirm = _run(
@@ -377,7 +386,7 @@ def test_plan_clean_yes_interactive_still_asks_dangerous() -> None:
 def test_plan_clean_interactive_safe_sudo_never_probes_sudo(mocker: MockerFixture) -> None:
     """Verify an interactive SAFE sudo action is approved without probing sudo."""
     # Given a safe sudo action
-    rep = _report(s=(Tier.SAFE, {"action": {"needs_sudo": True}}))
+    rep = _report(s=(RiskLevel.SAFE, {"action": {"cleanup": RunCommand("tool", with_sudo=True)}}))
     sudo_ready = mocker.Mock(return_value=False)
 
     # When approved interactively
@@ -393,12 +402,12 @@ def test_plan_clean_interactive_safe_sudo_never_probes_sudo(mocker: MockerFixtur
     sudo_ready.assert_not_called()
 
 
-@pytest.mark.parametrize("help_text", ["Drops stuff", "Drops stuff."])
-def test_risky_prompt_names_tool_and_help(help_text: str) -> None:
-    """Verify the risky prompt leads with the tool and the help sentence, never the action name."""
-    # Given a sized caution action, with or without a final period in its help
+@pytest.mark.parametrize("description_text", ["Drops stuff", "Drops stuff."])
+def test_risky_prompt_names_tool_and_description(description_text: str) -> None:
+    """Verify the risky prompt leads with the tool and the description sentence, never the action name."""
+    # Given a sized caution action, with or without a final period in its description
     c = ActionReport(
-        action=make_action(name="c", tier=Tier.CAUTION, help=help_text),
+        action=make_action(name="c", risk_level=RiskLevel.CAUTION, description=description_text),
         size_bytes=5,
         resolved_paths=[],
     )
@@ -408,10 +417,15 @@ def test_risky_prompt_names_tool_and_help(help_text: str) -> None:
 
 
 def test_risky_prompt_dangerous_sudo_wording() -> None:
-    """Verify dangerous and sudo suffixes follow the help with single periods."""
+    """Verify dangerous and sudo suffixes follow the description with single periods."""
     # Given an unsized dangerous sudo action
     d = ActionReport(
-        action=make_action(name="d", tier=Tier.DANGEROUS, help="Nukes stuff", needs_sudo=True),
+        action=make_action(
+            name="d",
+            risk_level=RiskLevel.DANGEROUS,
+            description="Nukes stuff",
+            cleanup=RunCommand("tool", with_sudo=True),
+        ),
         size_bytes=None,
         resolved_paths=[],
     )
@@ -426,12 +440,14 @@ def test_risky_prompt_mentions_sudo() -> None:
     """Verify the risky prompt says when an action requires sudo."""
     # Given a caution sudo action and a caution plain action
     rooty = ActionReport(
-        action=make_action(name="r", tier=Tier.CAUTION, command=("tool",), needs_sudo=True),
+        action=make_action(
+            name="r", risk_level=RiskLevel.CAUTION, cleanup=RunCommand("tool", with_sudo=True)
+        ),
         size_bytes=1,
         resolved_paths=[],
     )
     plain = ActionReport(
-        action=make_action(name="q", tier=Tier.CAUTION), size_bytes=1, resolved_paths=[]
+        action=make_action(name="q", risk_level=RiskLevel.CAUTION), size_bytes=1, resolved_paths=[]
     )
 
     # When

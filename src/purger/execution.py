@@ -12,7 +12,7 @@ from purger.registry import is_busy
 from purger.reports import ActionReport, PluginReport, Status
 from purger.runner import run_action
 from purger.safety import invoking_home
-from purger.sizing import measure_footprint
+from purger.sizing import measure_total_size
 
 
 @dataclass
@@ -87,7 +87,7 @@ def execute(
                 continue
             for report in todo:
                 label = f"{plugin_report.plugin.name}/{report.action.name}"
-                if report.action.needs_sudo:
+                if report.action.runs_with_sudo:
                     pp.warning(f"Running {label} with sudo")
                 else:
                     pp.info(f"Running {label}")
@@ -105,15 +105,15 @@ def execute(
 
 def _set_freed(ran: list[PluginReport], *, dangerous: bool) -> None:
     def measure(plugin_report: PluginReport) -> int | None:
-        return measure_footprint(
+        return measure_total_size(
             plugin_report.plugin,
             include_dangerous=dangerous,
-            prepared_paths=plugin_report.prepared_paths,
+            settings=plugin_report.settings,
         )
 
     for index, after in map_as_completed(measure, items=ran):
         plugin_report = ran[index]
-        before = plugin_report.footprint_bytes
+        before = plugin_report.total_size_bytes
         plugin_report.after_bytes = after
         plugin_report.freed_bytes = (
             None if before is None or after is None else max(before - after, 0)

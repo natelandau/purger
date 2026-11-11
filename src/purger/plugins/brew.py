@@ -5,17 +5,24 @@ from pathlib import Path
 
 from nclutils.sh import ShellCommandError, run_command
 
-from purger.plugin import Action, Plugin, Tier
-from purger.plugins._shared import program_matcher
-from purger.sizing import SIZE_CMD_TIMEOUT_SECONDS, disk_usage, parse_human_size
+from purger.plugin import (
+    Action,
+    Plugin,
+    RiskLevel,
+    RunCommand,
+    SizeComputedBy,
+    SizeReportedByCommand,
+    program_matching,
+)
+from purger.sizing import SIZE_COMMAND_TIMEOUT_SECONDS, disk_usage, parse_human_size
 
 _FREED = re.compile(r"free approximately (.+?) of disk space")
 _DECIMAL_LOOKING_UNIT = re.compile(r"([KMGT])B\s*$", re.IGNORECASE)
 _WOULD_REMOVE = re.compile(r"^Would remove: (.+) \([^()]*\)$", re.MULTILINE)
-_CLEANUP_DRY_RUN = ("brew", "cleanup", "--prune=all", "--dry-run")
+BREW_CLEANUP_DRY_RUN_COMMAND = ("brew", "cleanup", "--prune=all", "--dry-run")
 
 
-def _parse_dry_run(output: str) -> int:
+def bytes_freed_by_cleanup(output: str) -> int:
     """Read the bytes a `brew cleanup` dry run would free.
 
     Brew prints no summary line when nothing would be freed, so a missing
@@ -59,15 +66,15 @@ def _autoremove_racks() -> list[Path]:
         list[Path]: One rack per formula, holding every installed version.
     """
     cellar = Path(
-        run_command(["brew", "--cellar"], timeout=SIZE_CMD_TIMEOUT_SECONDS).stdout.strip()
+        run_command(["brew", "--cellar"], timeout=SIZE_COMMAND_TIMEOUT_SECONDS).stdout.strip()
     )
     output = run_command(
-        ["brew", "autoremove", "--dry-run"], timeout=SIZE_CMD_TIMEOUT_SECONDS
+        ["brew", "autoremove", "--dry-run"], timeout=SIZE_COMMAND_TIMEOUT_SECONDS
     ).stdout
     return [cellar / name for name in _autoremove_names(output)]
 
 
-def _autoremove_size() -> int:
+def bytes_freed_by_autoremove() -> int:
     """Measure the Cellar directories of the formulae `brew autoremove` would remove.
 
     Returns:
@@ -76,7 +83,7 @@ def _autoremove_size() -> int:
     return disk_usage(_autoremove_racks())
 
 
-def _footprint(cleanup_output: str) -> int:
+def bytes_freed_by_both_actions(cleanup_output: str) -> int:
     """Size both actions together without counting a path twice.
 
     Cleanup removes old versions of formulae that autoremove also uninstalls, so
@@ -90,7 +97,7 @@ def _footprint(cleanup_output: str) -> int:
     Returns:
         int: Bytes that running both actions would free.
     """
-    cleanup = _parse_dry_run(cleanup_output)
+    cleanup = bytes_freed_by_cleanup(cleanup_output)
     try:
         racks = _autoremove_racks()
     except ShellCommandError:
@@ -103,28 +110,30 @@ def _footprint(cleanup_output: str) -> int:
 PLUGIN = Plugin(
     name="brew",
     description="Homebrew downloads, outdated versions, and unneeded dependencies",
-    requires="brew",
-    size_cmd=_CLEANUP_DRY_RUN,
-    parse_size=_footprint,
-    busy_process=program_matcher(r"brew(\.sh|\.rb)?"),
+    requires_on_path="brew",
+    skip_while_running=program_matching(r"brew(\.sh|\.rb)?"),
+    total_size=SizeReportedByCommand(
+        BREW_CLEANUP_DRY_RUN_COMMAND, read_size=bytes_freed_by_both_actions
+    ),
     actions=(
         Action(
             name="cleanup",
-            tier=Tier.SAFE,
-            help="Remove old formula versions and the entire download cache.",
-            command=("brew", "cleanup", "--prune=all"),
-            size_cmd=_CLEANUP_DRY_RUN,
-            parse_size=_parse_dry_run,
+            risk_level=RiskLevel.SAFE,
+            description="Remove old formula versions and the entire download cache.",
+            cleanup=RunCommand("brew", "cleanup", "--prune=all"),
+            size=SizeReportedByCommand(
+                BREW_CLEANUP_DRY_RUN_COMMAND, read_size=bytes_freed_by_cleanup
+            ),
         ),
         Action(
             name="autoremove",
-            tier=Tier.CAUTION,
-            help=(
+            risk_level=RiskLevel.CAUTION,
+            description=(
                 "Uninstall formulae that were installed only as dependencies "
                 "and that nothing installed needs anymore."
             ),
-            command=("brew", "autoremove"),
-            size=_autoremove_size,
+            cleanup=RunCommand("brew", "autoremove"),
+            size=SizeComputedBy(bytes_freed_by_autoremove),
         ),
     ),
 )

@@ -39,11 +39,12 @@ from purger.output import (
     render_table,
     render_total,
 )
-from purger.plugin import Plugin, Tier
+from purger.plugin import Plugin, RiskLevel, reset_run_caches
 from purger.registry import (
     ProcessTable,
     UnknownPluginError,
     discover_plugins,
+    is_configured,
     select_plugins,
     skip_reason,
 )
@@ -55,7 +56,7 @@ from purger.reports import (
     Status,
 )
 from purger.runner import sudo_ready
-from purger.sizing import NotConfiguredError, measure_plugin
+from purger.sizing import measure_plugin
 
 
 class ExitCode(IntEnum):
@@ -189,15 +190,12 @@ def _measure_one(
     reason = skip_reason(plugin, processes=processes)
     if reason is not None:
         return SkippedPlugin(name=plugin.name, reason=reason)
-    try:
-        return measure_plugin(
-            plugin,
-            include_dangerous=dangerous,
-            settings=config.settings_for(plugin),
-            with_details=with_details,
-        )
-    except NotConfiguredError:
+    settings = config.settings_for(plugin)
+    if not is_configured(plugin, settings):
         return SkippedPlugin(name=plugin.name, reason=SkipReason.NOT_CONFIGURED)
+    return measure_plugin(
+        plugin, include_dangerous=dangerous, settings=settings, with_details=with_details
+    )
 
 
 def _measure(
@@ -348,7 +346,7 @@ def _warn_not_run(reports: list[PluginReport]) -> None:
         if report.status is Status.SKIPPED:
             sudo.append(label)
         elif report.status is Status.DECLINED:
-            (safe if report.action.tier is Tier.SAFE else risky).append(label)
+            (safe if report.action.risk_level is RiskLevel.SAFE else risky).append(label)
     if safe:
         pp.warning(f"Not run because purger cannot prompt here (pass --yes): {', '.join(safe)}")
     if risky:
@@ -363,7 +361,7 @@ def _print_plan(reports: list[PluginReport]) -> None:
         pp.info("Nothing to clean.")
         return
     for label, report in planned:
-        pp.dryrun(f"{label} ({report.action.tier.value}): {action_summary(report)}")
+        pp.dryrun(f"{label} ({report.action.risk_level.value}): {action_summary(report)}")
 
 
 def _print_overview(reports: list[PluginReport], *, verbosity: int, by_action: bool) -> None:
@@ -373,7 +371,7 @@ def _print_overview(reports: list[PluginReport], *, verbosity: int, by_action: b
         return
     console = pp.console()
     for report in sorted(
-        reports, key=lambda r: largest_first(size=r.footprint_bytes, name=r.plugin.name)
+        reports, key=lambda r: largest_first(size=r.total_size_bytes, name=r.plugin.name)
     ):
         console.print(render_plugin_details(report, verbosity=verbosity, by_action=by_action))
         console.print()
@@ -462,6 +460,7 @@ def info(
     Returns:
         int: The process exit code.
     """
+    reset_run_caches()
     verbosity = verbose + _GLOBAL_VERBOSITY.get()
     scan = _begin(plugins, dangerous=dangerous, json_output=json_output, verbose=verbosity)
     if isinstance(scan, int):
@@ -509,6 +508,7 @@ def clean(
     Returns:
         int: The process exit code.
     """
+    reset_run_caches()
     verbosity = verbose + _GLOBAL_VERBOSITY.get()
     scan = _begin(plugins, dangerous=dangerous, json_output=json_output, verbose=verbosity)
     if isinstance(scan, int):

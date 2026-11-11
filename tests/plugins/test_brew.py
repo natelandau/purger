@@ -8,7 +8,7 @@ from pytest_mock import MockerFixture
 
 from purger.config import Config
 from purger.plugins import brew
-from purger.plugins.brew import _parse_dry_run
+from purger.plugins.brew import bytes_freed_by_cleanup
 from purger.sizing import disk_usage, measure_plugin
 from tests.conftest import make_completed
 
@@ -30,7 +30,7 @@ from tests.conftest import make_completed
 def test_parse_dry_run_extracts_freed_bytes(output: str, expected: int) -> None:
     """Verify the brew parser reads the freed-space summary line in binary units."""
     # Given / When
-    result = _parse_dry_run(output)
+    result = bytes_freed_by_cleanup(output)
 
     # Then
     assert result == expected
@@ -63,7 +63,7 @@ def test_brew_autoremove_size_measures_cellar_racks(tmp_path: Path, mocker: Mock
     )
 
     # When
-    size = brew._autoremove_size()
+    size = brew.bytes_freed_by_autoremove()
 
     # Then
     assert size == disk_usage([tmp_path / "libfoo"])
@@ -83,10 +83,10 @@ def test_brew_autoremove_size_zero_when_nothing_removable(
     )
 
     # When / Then
-    assert brew._autoremove_size() == 0
+    assert brew.bytes_freed_by_autoremove() == 0
 
 
-def test_brew_footprint_counts_versions_both_actions_remove_once(
+def test_brew_total_size_counts_versions_both_actions_remove_once(
     tmp_path: Path, mocker: MockerFixture
 ) -> None:
     """Verify an old version that cleanup and autoremove both remove is counted once."""
@@ -100,7 +100,7 @@ def test_brew_footprint_counts_versions_both_actions_remove_once(
     outputs = {
         ("brew", "--cellar"): f"{tmp_path}\n",
         ("brew", "autoremove", "--dry-run"): "==> Would autoremove 1 unneeded formula:\nlibfoo\n",
-        brew._CLEANUP_DRY_RUN: cleanup_output,
+        brew.BREW_CLEANUP_DRY_RUN_COMMAND: cleanup_output,
     }
     mocker.patch(
         "purger.plugins.brew.run_command",
@@ -118,17 +118,17 @@ def test_brew_footprint_counts_versions_both_actions_remove_once(
         brew.PLUGIN, include_dangerous=False, settings=Config().settings_for(brew.PLUGIN)
     )
 
-    # Then the footprint is cleanup's total plus the formula folder, less the old version
+    # Then the total size is cleanup's total plus the formula folder, less the old version
     rack = old.parent
-    assert report.footprint_bytes == 1024 + disk_usage([rack]) - disk_usage([old])
+    assert report.total_size_bytes == 1024 + disk_usage([rack]) - disk_usage([old])
     sizes = {r.action.name: r.size_bytes for r in report.actions}
     assert sizes == {"cleanup": 1024, "autoremove": disk_usage([rack])}
 
 
-def test_brew_footprint_falls_back_to_cleanup_when_autoremove_fails(
+def test_brew_total_size_falls_back_to_cleanup_when_autoremove_fails(
     mocker: MockerFixture,
 ) -> None:
-    """Verify the footprint keeps cleanup's total when the autoremove dry run fails."""
+    """Verify the total size keeps cleanup's total when the autoremove dry run fails."""
     # Given
     mocker.patch(
         "purger.plugins.brew.run_command",
@@ -138,7 +138,7 @@ def test_brew_footprint_falls_back_to_cleanup_when_autoremove_fails(
     output = "==> This operation would free approximately 2KB of disk space.\n"
 
     # When / Then
-    assert brew._footprint(output) == 2048
+    assert brew.bytes_freed_by_both_actions(output) == 2048
 
 
 _BREW = "/opt/homebrew/Library/Homebrew"
@@ -161,10 +161,10 @@ _BREW = "/opt/homebrew/Library/Homebrew"
         (["/opt/homebrew/bin/brewx"], False),
     ],
 )
-def test_brew_busy_process_matches_brew_runs(cmdline: list[str], expected: bool) -> None:
+def test_brew_skip_while_running_matches_brew_runs(cmdline: list[str], expected: bool) -> None:
     """Verify brew counts as busy however it was launched, and nothing else does."""
     # Given
-    assert brew.PLUGIN.busy_process is not None
+    assert brew.PLUGIN.skip_while_running is not None
 
     # When / Then
-    assert brew.PLUGIN.busy_process(cmdline) is expected
+    assert brew.PLUGIN.skip_while_running(cmdline) is expected

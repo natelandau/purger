@@ -2,15 +2,30 @@
 
 import re
 
-from purger.plugin import Action, Plugin, Tier
+from purger.plugin import (
+    Action,
+    OperatingSystem,
+    Plugin,
+    RiskLevel,
+    RunCommand,
+    SizeOfPaths,
+    SizeReportedByCommand,
+)
 from purger.sizing import parse_human_size
 
-_SAVED = re.compile(r"disk space saved: ([\d.]+ ?[A-Za-z]*)")
-_OLD_VERSIONS_DRY_RUN = ("paccache", "--dryrun", "--nocolor")
-_UNINSTALLED_DRY_RUN = ("paccache", "--dryrun", "--uninstalled", "--keep", "0", "--nocolor")
+DISK_SPACE_SAVED = re.compile(r"disk space saved: ([\d.]+ ?[A-Za-z]*)")
+OLD_VERSIONS_DRY_RUN_COMMAND = ("paccache", "--dryrun", "--nocolor")
+UNINSTALLED_DRY_RUN_COMMAND = (
+    "paccache",
+    "--dryrun",
+    "--uninstalled",
+    "--keep",
+    "0",
+    "--nocolor",
+)
 
 
-def _saved_bytes(output: str) -> int:
+def paccache_saved_bytes(output: str) -> int:
     """Read the space a paccache dry run reports it would free.
 
     Args:
@@ -20,38 +35,38 @@ def _saved_bytes(output: str) -> int:
         int: Bytes from the "disk space saved" summary, or 0 when paccache
             found nothing to prune and printed no summary.
     """
-    match = _SAVED.search(output)
+    match = DISK_SPACE_SAVED.search(output)
     return parse_human_size(match.group(1)) if match else 0
 
 
 PLUGIN = Plugin(
     name="pacman",
     description="pacman cached package files",
-    platforms=frozenset({"linux"}),
-    requires="paccache",
-    paths=("/var/cache/pacman/pkg/*",),
+    operating_systems=(OperatingSystem.LINUX,),
+    requires_on_path="paccache",
+    total_size=SizeOfPaths("/var/cache/pacman/pkg/*"),
     actions=(
         Action(
             name="old-versions",
-            tier=Tier.SAFE,
-            help=(
+            risk_level=RiskLevel.SAFE,
+            description=(
                 "Remove all but the 3 newest cached versions of each package. "
                 "Downgrading further needs a download."
             ),
-            command=("paccache", "--remove"),
             # Under sudo, paccache never calls sudo itself, which could prompt mid-run.
-            needs_sudo=True,
-            size_cmd=_OLD_VERSIONS_DRY_RUN,
-            parse_size=_saved_bytes,
+            cleanup=RunCommand("paccache", "--remove", with_sudo=True),
+            size=SizeReportedByCommand(
+                OLD_VERSIONS_DRY_RUN_COMMAND, read_size=paccache_saved_bytes
+            ),
         ),
         Action(
             name="uninstalled",
-            tier=Tier.SAFE,
-            help="Remove every cached version of packages that are no longer installed.",
-            command=("paccache", "--remove", "--uninstalled", "--keep", "0"),
-            needs_sudo=True,
-            size_cmd=_UNINSTALLED_DRY_RUN,
-            parse_size=_saved_bytes,
+            risk_level=RiskLevel.SAFE,
+            description="Remove every cached version of packages that are no longer installed.",
+            cleanup=RunCommand(
+                "paccache", "--remove", "--uninstalled", "--keep", "0", with_sudo=True
+            ),
+            size=SizeReportedByCommand(UNINSTALLED_DRY_RUN_COMMAND, read_size=paccache_saved_bytes),
         ),
     ),
 )

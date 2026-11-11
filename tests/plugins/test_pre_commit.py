@@ -12,7 +12,12 @@ from purger.plugins import pre_commit
     ("env", "expected"),
     [
         ({"PRE_COMMIT_HOME": "/pch"}, Path("/pch")),
+        ({"PRE_COMMIT_HOME": "/pch/", "XDG_CACHE_HOME": "/xdg"}, Path("/pch")),
+        ({"PRE_COMMIT_HOME": "~/pch"}, Path("/home/me/pch")),
+        ({"PRE_COMMIT_HOME": "relative/pch"}, Path("/home/me/.cache/pre-commit")),
         ({"XDG_CACHE_HOME": "/xdg"}, Path("/xdg/pre-commit")),
+        ({"XDG_CACHE_HOME": "~/xdg"}, Path("/home/me/xdg/pre-commit")),
+        ({"XDG_CACHE_HOME": "relative"}, Path("/home/me/.cache/pre-commit")),
         ({}, Path("/home/me/.cache/pre-commit")),
     ],
 )

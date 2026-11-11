@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from nclutils.strings import human_size
 
-from purger.plugin import Tier
+from purger.plugin import RiskLevel
 from purger.reports import ActionReport, PluginReport, Status, sum_known
 
 
@@ -42,7 +42,7 @@ def safe_prompt(items: list[tuple[str, ActionReport]]) -> str:
     """
     sudo_tools: dict[str, bool] = {}
     for plugin, report in items:
-        sudo_tools[plugin] = sudo_tools.get(plugin, False) or report.action.needs_sudo
+        sudo_tools[plugin] = sudo_tools.get(plugin, False) or report.action.runs_with_sudo
     names = ", ".join(
         f"{plugin} (sudo)" if needs_sudo else plugin for plugin, needs_sudo in sudo_tools.items()
     )
@@ -65,10 +65,10 @@ def risky_prompt(plugin_name: str, report: ActionReport) -> str:
     if report.size_bytes is not None:
         # Before the help, which can hold several sentences the size must not attach to.
         text += f" (about {human_size(report.size_bytes)})"
-    text += f": {action.help.strip().rstrip('.')}"
-    if action.tier is Tier.DANGEROUS:
+    text += f": {action.description.strip().rstrip('.')}"
+    if action.risk_level is RiskLevel.DANGEROUS:
         text += ". This may permanently delete data"
-    if action.needs_sudo:
+    if action.runs_with_sudo:
         text += ". Requires sudo"
     return f"{text}. Continue?"
 
@@ -102,12 +102,12 @@ def plan_clean(
         return []
 
     approved: list[_Entry] = []
-    safe = [e for e in candidates if e.report.action.tier is Tier.SAFE]
+    safe = [e for e in candidates if e.report.action.risk_level is RiskLevel.SAFE]
     if safe:
         approved.extend(_decide_safe(safe=safe, opts=opts, confirm=confirm, sudo_ready=sudo_ready))
 
-    for tier in (Tier.CAUTION, Tier.DANGEROUS):
-        for entry in (e for e in candidates if e.report.action.tier is tier):
+    for risk_level in (RiskLevel.CAUTION, RiskLevel.DANGEROUS):
+        for entry in (e for e in candidates if e.report.action.risk_level is risk_level):
             if opts.interactive and confirm(
                 risky_prompt(plugin_name=entry.plugin_name, report=entry.report)
             ):
@@ -145,7 +145,7 @@ def _decide_safe(
     approved: list[_Entry] = []
     sudo_ok: bool | None = None
     for entry in safe:
-        if entry.report.action.needs_sudo:
+        if entry.report.action.runs_with_sudo:
             if sudo_ok is None:
                 sudo_ok = sudo_ready()
             if not sudo_ok:
@@ -156,10 +156,10 @@ def _decide_safe(
 
 
 def _nothing_to_clean(action_report: ActionReport, plugin_report: PluginReport) -> bool:
-    """Judge emptiness by the action's own size, falling back to the plugin footprint."""
+    """Judge emptiness by the action's own size, falling back to the plugin total size."""
     if action_report.size_bytes is not None:
         return action_report.size_bytes == 0
-    return plugin_report.footprint_bytes == 0
+    return plugin_report.total_size_bytes == 0
 
 
 def _filter_candidates(reports: list[PluginReport], opts: CleanOptions) -> list[_Entry]:
@@ -167,7 +167,7 @@ def _filter_candidates(reports: list[PluginReport], opts: CleanOptions) -> list[
     candidates: list[_Entry] = []
     for plugin_report in reports:
         for action_report in plugin_report.actions:
-            if action_report.action.tier is Tier.DANGEROUS and not opts.dangerous:
+            if action_report.action.risk_level is RiskLevel.DANGEROUS and not opts.dangerous:
                 action_report.status = Status.DECLINED
             elif _nothing_to_clean(action_report=action_report, plugin_report=plugin_report):
                 action_report.status = Status.NOTHING_TO_CLEAN

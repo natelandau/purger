@@ -23,20 +23,30 @@ from purger.output import (
     render_table,
     render_total,
 )
-from purger.plugin import Detail, Tier
+from purger.plugin import (
+    DeletePaths,
+    RiskLevel,
+    RunCommand,
+    SizeBreakdownRow,
+)
 from purger.reports import ActionReport, PluginReport, SkippedPlugin, SkipReason, Status
-from tests.conftest import make_action, make_plugin, table_row
+from tests.conftest import EMPTY_SETTINGS, make_action, make_plugin, table_row
 
 
 def _reports() -> list[PluginReport]:
     known = ActionReport(
-        action=make_action(name="prune", tier=Tier.SAFE, help="Prune [cache]", command=("x", "p")),
+        action=make_action(
+            name="prune",
+            risk_level=RiskLevel.SAFE,
+            description="Prune [cache]",
+            cleanup=RunCommand("x", "p"),
+        ),
         size_bytes=2048,
         resolved_paths=[Path("/home/u/.cache/x")],
         status=Status.DONE,
     )
     unknown = ActionReport(
-        action=make_action(name="wipe", tier=Tier.DANGEROUS, command=None, paths=("~/w",)),
+        action=make_action(name="wipe", risk_level=RiskLevel.DANGEROUS, cleanup=DeletePaths("~/w")),
         size_bytes=None,
         resolved_paths=[],
         status=Status.FAILED,
@@ -44,14 +54,16 @@ def _reports() -> list[PluginReport]:
     )
     return [
         PluginReport(
+            settings=EMPTY_SETTINGS,
             plugin=make_plugin(name="alpha", description="Alpha tool"),
-            footprint_bytes=2048,
+            total_size_bytes=2048,
             actions=[known, unknown],
             freed_bytes=2048,
         ),
         PluginReport(
+            settings=EMPTY_SETTINGS,
             plugin=make_plugin(name="beta", description="Beta tool"),
-            footprint_bytes=None,
+            total_size_bytes=None,
             actions=[],
         ),
     ]
@@ -63,21 +75,22 @@ def _text(table: Table) -> str:
     return console.export_text()
 
 
-def _sized(name: str, footprint: int | None, *sizes: int | None) -> PluginReport:
+def _sized(name: str, total_size: int | None, *sizes: int | None) -> PluginReport:
     """Build a plugin report whose actions have the given sizes."""
     actions = [
         ActionReport(action=make_action(name=f"act{i}"), size_bytes=size, resolved_paths=[])
         for i, size in enumerate(sizes)
     ]
     return PluginReport(
+        settings=EMPTY_SETTINGS,
         plugin=make_plugin(name=name, description=f"{name} tool"),
-        footprint_bytes=footprint,
+        total_size_bytes=total_size,
         actions=actions,
     )
 
 
 def test_grand_total_sums_known_and_none_when_all_unknown() -> None:
-    """Verify grand_total sums known footprints and is None when none are known."""
+    """Verify grand_total sums known total sizes and is None when none are known."""
     # Given
     reports = _reports()
 
@@ -168,11 +181,16 @@ def test_error_document() -> None:
     }
 
 
-def test_grand_total_sums_several_known_footprints() -> None:
-    """Verify grand_total adds every known footprint and ignores unknown ones."""
-    # Given three plugins, two with known footprints
+def test_grand_total_sums_several_known_total_sizes() -> None:
+    """Verify grand_total adds every known total size and ignores unknown ones."""
+    # Given three plugins, two with known total sizes
     reports = [
-        PluginReport(plugin=make_plugin(name=name), footprint_bytes=size, actions=[])
+        PluginReport(
+            settings=EMPTY_SETTINGS,
+            plugin=make_plugin(name=name),
+            total_size_bytes=size,
+            actions=[],
+        )
         for name, size in (("a", 100), ("b", None), ("c", 23))
     ]
 
@@ -185,7 +203,11 @@ def test_clean_document_sums_several_freed() -> None:
     # Given
     reports = [
         PluginReport(
-            plugin=make_plugin(name=name), footprint_bytes=1, actions=[], freed_bytes=freed
+            settings=EMPTY_SETTINGS,
+            plugin=make_plugin(name=name),
+            total_size_bytes=1,
+            actions=[],
+            freed_bytes=freed,
         )
         for name, freed in (("a", 5), ("b", None), ("c", 7))
     ]
@@ -198,7 +220,7 @@ def test_clean_document_sums_several_freed() -> None:
 
 
 @pytest.mark.parametrize(
-    ("footprint", "sizes", "expected"),
+    ("total_size", "sizes", "expected"),
     [
         (100, (40, 60), False),
         (100, (None, 100), False),
@@ -211,35 +233,36 @@ def test_clean_document_sums_several_freed() -> None:
     ],
     ids=[
         "all-known",
-        "known-covers-footprint",
+        "known-covers-total-size",
         "unknown-part-remains",
         "only-unknown",
-        "unknown-footprint-and-action",
-        "unknown-footprint-known-action",
+        "unknown-total-size-and-action",
+        "unknown-total-size-known-action",
         "no-included-actions",
-        "empty-footprint",
+        "empty-total-size",
     ],
 )
 def test_is_partial_rules(
-    footprint: int | None, sizes: tuple[int | None, ...], expected: bool
+    total_size: int | None, sizes: tuple[int | None, ...], expected: bool
 ) -> None:
-    """Verify a tool is partial unless its included actions account for the whole footprint."""
+    """Verify a tool is partial unless its included actions account for the whole total size."""
     # Given
-    report = _sized("t", footprint, *sizes)
+    report = _sized("t", total_size, *sizes)
 
     # When / Then
     assert is_partial(report) is expected
 
 
-def test_is_partial_empty_footprint_with_unknown_outside_action() -> None:
-    """Verify a zero footprint stays partial when an outside-footprint action has no size."""
+def test_is_partial_empty_total_size_with_unknown_outside_action() -> None:
+    """Verify a zero total size stays partial when an action that adds to the total size has no size."""
     # Given
     report = PluginReport(
+        settings=EMPTY_SETTINGS,
         plugin=make_plugin(name="t", description="t tool"),
-        footprint_bytes=0,
+        total_size_bytes=0,
         actions=[
             ActionReport(
-                action=make_action(name="outside", outside_footprint=True),
+                action=make_action(name="outside", adds_to_plugin_total_size=True),
                 size_bytes=None,
                 resolved_paths=[],
             )
@@ -251,7 +274,7 @@ def test_is_partial_empty_footprint_with_unknown_outside_action() -> None:
 
 
 def test_render_table_one_row_per_tool_sorted_by_name() -> None:
-    """Verify the table shows one row per tool, sorted by name, with no action names or tiers."""
+    """Verify the table shows one row per tool, sorted by name, with no action names or risk levels."""
     # Given an exact tool, an unknown-size tool, and a partial tool, out of name order
     reports = [
         _sized("gamma", 4096, None),
@@ -297,8 +320,9 @@ def test_render_table_escapes_markup() -> None:
 def _ran(name: str, before: int | None, after: int | None, freed: int | None) -> PluginReport:
     """Build a report for a tool that ran, with its before, after, and freed sizes."""
     return PluginReport(
+        settings=EMPTY_SETTINGS,
         plugin=make_plugin(name=name, description=f"{name} tool"),
-        footprint_bytes=before,
+        total_size_bytes=before,
         actions=[],
         freed_bytes=freed,
         after_bytes=after,
@@ -365,10 +389,10 @@ def _render(renderable: RenderableType | None, width: int = 120) -> str:
 
 
 def _path_report(tmp_path: Path, sizes: dict[str, int], **overrides: object) -> ActionReport:
-    """Build a measured path action whose detail rows are one per path."""
-    action = make_action(command=None, paths=(str(tmp_path / "*"),), **overrides)
+    """Build a measured path action whose size breakdown rows are one per path."""
+    action = make_action(cleanup=DeletePaths(str(tmp_path / "*")), **overrides)
     rows = [
-        Detail(label=name, size_bytes=size, paths=(tmp_path / name,))
+        SizeBreakdownRow(label=name, size_bytes=size, paths=(tmp_path / name,))
         for name, size in sizes.items()
     ]
     return ActionReport(
@@ -383,8 +407,9 @@ def test_plugin_details_without_rows_still_shows_header() -> None:
     """Verify a plugin with nothing to list keeps its name, size, and description."""
     # Given
     report = PluginReport(
+        settings=EMPTY_SETTINGS,
         plugin=make_plugin(name="brew", description="Homebrew downloads"),
-        footprint_bytes=2048,
+        total_size_bytes=2048,
         actions=[ActionReport(action=make_action(), size_bytes=2048, resolved_paths=[])],
     )
 
@@ -399,10 +424,11 @@ def test_plugin_details_without_rows_still_shows_header() -> None:
 
 def test_plugin_details_marks_partial_purge() -> None:
     """Verify the header carries the mark the table's Partial purge column showed."""
-    # Given an action with an unknown size under a known footprint
+    # Given an action with an unknown size under a known total size
     report = PluginReport(
+        settings=EMPTY_SETTINGS,
         plugin=make_plugin(),
-        footprint_bytes=2048,
+        total_size_bytes=2048,
         actions=[ActionReport(action=make_action(), size_bytes=None, resolved_paths=[])],
     )
 
@@ -414,21 +440,23 @@ def test_plugin_details_marks_partial_purge() -> None:
 
 
 def test_plugin_details_by_action_groups_rows_under_each_action() -> None:
-    """Verify clean's sections put each action's rows under its name and tier."""
+    """Verify clean's sections put each action's rows under its name and risk level."""
     # Given two actions with rows, one of them empty
     full = ActionReport(
-        action=make_action(name="deps", tier=Tier.CAUTION),
+        action=make_action(name="deps", risk_level=RiskLevel.CAUTION),
         size_bytes=5,
         resolved_paths=[],
-        details=[Detail(label="row-of-deps", size_bytes=5)],
+        details=[SizeBreakdownRow(label="row-of-deps", size_bytes=5)],
     )
     empty = ActionReport(
         action=make_action(name="caches"),
         size_bytes=0,
         resolved_paths=[],
-        details=[Detail(label="row-of-caches", size_bytes=0)],
+        details=[SizeBreakdownRow(label="row-of-caches", size_bytes=0)],
     )
-    report = PluginReport(plugin=make_plugin(), footprint_bytes=5, actions=[empty, full])
+    report = PluginReport(
+        settings=EMPTY_SETTINGS, plugin=make_plugin(), total_size_bytes=5, actions=[empty, full]
+    )
 
     # When
     text = _render(render_plugin_details(report, verbosity=1, by_action=True))
@@ -443,9 +471,13 @@ def test_plugin_details_by_action_lists_actions_without_rows() -> None:
     """Verify clean's sections name a command action that has a size but no rows."""
     # Given
     command = ActionReport(
-        action=make_action(name="prune", tier=Tier.CAUTION), size_bytes=600, resolved_paths=[]
+        action=make_action(name="prune", risk_level=RiskLevel.CAUTION),
+        size_bytes=600,
+        resolved_paths=[],
     )
-    report = PluginReport(plugin=make_plugin(), footprint_bytes=600, actions=[command])
+    report = PluginReport(
+        settings=EMPTY_SETTINGS, plugin=make_plugin(), total_size_bytes=600, actions=[command]
+    )
 
     # When
     text = _render(render_plugin_details(report, verbosity=1, by_action=True))
@@ -455,7 +487,7 @@ def test_plugin_details_by_action_lists_actions_without_rows() -> None:
     assert human_size(600) in text
 
 
-def test_render_total_sums_known_footprints() -> None:
+def test_render_total_sums_known_total_sizes() -> None:
     """Verify the closing total line matches the table's total."""
     # Given / When
     text = _render(render_total(_reports()))
@@ -465,11 +497,16 @@ def test_render_total_sums_known_footprints() -> None:
     assert human_size(2048) in text
 
 
-def test_plugin_details_header_uses_footprint_and_not_cleaned_line(tmp_path: Path) -> None:
-    """Verify rows that fall short of the footprint end with a not cleaned line."""
-    # Given a footprint larger than its one path action
+def test_plugin_details_header_uses_total_size_and_not_cleaned_line(tmp_path: Path) -> None:
+    """Verify rows that fall short of the total size end with a not cleaned line."""
+    # Given a total size larger than its one path action
     action = _path_report(tmp_path, {"a": 400})
-    report = PluginReport(plugin=make_plugin(name="ruby"), footprint_bytes=1000, actions=[action])
+    report = PluginReport(
+        settings=EMPTY_SETTINGS,
+        plugin=make_plugin(name="ruby"),
+        total_size_bytes=1000,
+        actions=[action],
+    )
 
     # When
     text = _render(render_plugin_details(report, verbosity=1))
@@ -486,7 +523,12 @@ def test_plugin_details_not_listed_when_command_action_has_size(tmp_path: Path) 
     # Given one listed path action and one command action with a size and no rows
     listed = _path_report(tmp_path, {"a": 400})
     command = ActionReport(action=make_action(name="b"), size_bytes=600, resolved_paths=[])
-    report = PluginReport(plugin=make_plugin(), footprint_bytes=1000, actions=[listed, command])
+    report = PluginReport(
+        settings=EMPTY_SETTINGS,
+        plugin=make_plugin(),
+        total_size_bytes=1000,
+        actions=[listed, command],
+    )
 
     # When
     text = _render(render_plugin_details(report, verbosity=1))
@@ -500,7 +542,12 @@ def test_plugin_details_lists_every_row_at_v(tmp_path: Path) -> None:
     """Verify -v lists every row, however many there are."""
     # Given 17 rows
     action = _path_report(tmp_path, {f"r{i:02}": 100 - i for i in range(17)})
-    report = PluginReport(plugin=make_plugin(), footprint_bytes=action.size_bytes, actions=[action])
+    report = PluginReport(
+        settings=EMPTY_SETTINGS,
+        plugin=make_plugin(),
+        total_size_bytes=action.size_bytes,
+        actions=[action],
+    )
 
     # When
     text = _render(render_plugin_details(report, verbosity=1))
@@ -514,7 +561,9 @@ def test_plugin_details_vv_shows_full_paths(tmp_path: Path) -> None:
     """Verify -vv lists each row's paths."""
     # Given
     action = _path_report(tmp_path, {"a": 1})
-    report = PluginReport(plugin=make_plugin(), footprint_bytes=1, actions=[action])
+    report = PluginReport(
+        settings=EMPTY_SETTINGS, plugin=make_plugin(), total_size_bytes=1, actions=[action]
+    )
 
     # When
     text = _render(render_plugin_details(report, verbosity=2), width=400)
@@ -536,7 +585,7 @@ def test_action_summary_command_with_sudo() -> None:
     """Verify a command action summarizes as the command it runs."""
     # Given
     report = ActionReport(
-        action=make_action(command=("tool", "prune"), needs_sudo=True),
+        action=make_action(cleanup=RunCommand("tool", "prune", with_sudo=True)),
         size_bytes=None,
         resolved_paths=[],
     )
@@ -545,13 +594,15 @@ def test_action_summary_command_with_sudo() -> None:
     assert action_summary(report) == "would run sudo tool prune"
 
 
-def test_detail_rows_stay_indented_when_labels_wrap(tmp_path: Path) -> None:
+def test_size_breakdown_rows_stay_indented_when_labels_wrap(tmp_path: Path) -> None:
     """Verify a long label or path never wraps back to the left margin."""
     # Given a long label with a long path, rendered at 80 columns with paths
     long = "~/Library/Developer/Xcode/iOS DeviceSupport/iPhone18,1 27.0.1 (24A446) and more"
-    row = Detail(label=long, size_bytes=7, paths=(tmp_path / ("deep" * 30),))
+    row = SizeBreakdownRow(label=long, size_bytes=7, paths=(tmp_path / ("deep" * 30),))
     action = ActionReport(action=make_action(), size_bytes=7, resolved_paths=[], details=[row])
-    report = PluginReport(plugin=make_plugin(), footprint_bytes=7, actions=[action])
+    report = PluginReport(
+        settings=EMPTY_SETTINGS, plugin=make_plugin(), total_size_bytes=7, actions=[action]
+    )
 
     # When
     text = _render(render_plugin_details(report, verbosity=2), width=80)
@@ -578,7 +629,10 @@ def test_default_row_fits_one_line_at_80_columns(tmp_path: Path) -> None:
         action=make_action(), size_bytes=7_100_000_000, resolved_paths=[item], details=rows
     )
     report = PluginReport(
-        plugin=make_plugin(name="xcode"), footprint_bytes=7_100_000_000, actions=[action]
+        settings=EMPTY_SETTINGS,
+        plugin=make_plugin(name="xcode"),
+        total_size_bytes=7_100_000_000,
+        actions=[action],
     )
 
     # When
@@ -597,9 +651,11 @@ _LONG_NAME = "https___github_com_getsentry_sentry_cocoa_releases_download_9_33_0
 
 def _long_label_report() -> PluginReport:
     """Build a plugin whose one row has a label far longer than a line's label column."""
-    row = Detail(label=_LONG_NAME, size_bytes=5)
+    row = SizeBreakdownRow(label=_LONG_NAME, size_bytes=5)
     action = ActionReport(action=make_action(), size_bytes=5, resolved_paths=[], details=[row])
-    return PluginReport(plugin=make_plugin(), footprint_bytes=5, actions=[action])
+    return PluginReport(
+        settings=EMPTY_SETTINGS, plugin=make_plugin(), total_size_bytes=5, actions=[action]
+    )
 
 
 def test_long_label_shortened_in_middle_at_v() -> None:
@@ -627,11 +683,15 @@ def test_long_label_shown_in_full_at_vv() -> None:
 
 
 def test_info_document_actions_carry_details(tmp_path: Path) -> None:
-    """Verify each detail row reaches the JSON document with its fields."""
+    """Verify each size breakdown row reaches the JSON document with its fields."""
     # Given an action with one row
-    row = Detail(label="proj", size_bytes=7, items=(".venv",), paths=(tmp_path / "proj",))
+    row = SizeBreakdownRow(
+        label="proj", size_bytes=7, item_names=(".venv",), paths=(tmp_path / "proj",)
+    )
     action = ActionReport(action=make_action(), size_bytes=7, resolved_paths=[], details=[row])
-    report = PluginReport(plugin=make_plugin(), footprint_bytes=7, actions=[action])
+    report = PluginReport(
+        settings=EMPTY_SETTINGS, plugin=make_plugin(), total_size_bytes=7, actions=[action]
+    )
 
     # When
     doc = info_document(reports=[report], skipped=[])
@@ -645,12 +705,18 @@ def test_info_document_actions_carry_details(tmp_path: Path) -> None:
 def _inset_report(paths: dict[str, tuple[Path, ...]]) -> PluginReport:
     """Build a plugin whose rows each cover the given paths."""
     rows = [
-        Detail(label=label, size_bytes=10, paths=row_paths) for label, row_paths in paths.items()
+        SizeBreakdownRow(label=label, size_bytes=10, paths=row_paths)
+        for label, row_paths in paths.items()
     ]
     action = ActionReport(
         action=make_action(), size_bytes=10 * len(rows), resolved_paths=[], details=rows
     )
-    return PluginReport(plugin=make_plugin(), footprint_bytes=action.size_bytes, actions=[action])
+    return PluginReport(
+        settings=EMPTY_SETTINGS,
+        plugin=make_plugin(),
+        total_size_bytes=action.size_bytes,
+        actions=[action],
+    )
 
 
 def test_v_rows_hang_from_header_without_paths(tmp_path: Path) -> None:
@@ -706,11 +772,16 @@ def test_inset_rows_keep_their_columns_aligned(tmp_path: Path) -> None:
 def test_vv_long_label_never_cuts_the_size_at_80_columns() -> None:
     """Verify a full label wider than the terminal folds instead of cutting the size."""
     # Given a long label with a wide size and an item
-    row = Detail(label=_LONG_NAME, size_bytes=187_100_000, items=("artifacts",))
+    row = SizeBreakdownRow(label=_LONG_NAME, size_bytes=187_100_000, item_names=("artifacts",))
     action = ActionReport(
         action=make_action(), size_bytes=187_100_000, resolved_paths=[], details=[row]
     )
-    report = PluginReport(plugin=make_plugin(), footprint_bytes=187_100_000, actions=[action])
+    report = PluginReport(
+        settings=EMPTY_SETTINGS,
+        plugin=make_plugin(),
+        total_size_bytes=187_100_000,
+        actions=[action],
+    )
 
     # When
     text = _render(render_plugin_details(report, verbosity=2), width=80)

@@ -1,33 +1,42 @@
 """Plugin for the CocoaPods download cache."""
 
-from purger.plugin import Action, Plugin, Tier
-from purger.plugins._shared import env_dir
+from purger.plugin import (
+    Action,
+    OperatingSystem,
+    Plugin,
+    RiskLevel,
+    RunCommand,
+    SizeOfPaths,
+    directory_from_environment,
+)
 
 
-def _cache_dir() -> str:
+def cocoapods_cache_directory() -> str:
     """Return the CocoaPods cache folder, which `CP_CACHE_DIR` overrides before `CP_HOME_DIR`.
 
     Returns:
         str: The cache folder as a glob-safe pattern.
     """
-    home = env_dir("CP_HOME_DIR", "")
-    return env_dir("CP_CACHE_DIR", f"{home}/cache" if home else "~/Library/Caches/CocoaPods")
+    home = directory_from_environment("CP_HOME_DIR", default="")
+    return directory_from_environment(
+        "CP_CACHE_DIR", default=f"{home}/cache" if home else "~/Library/Caches/CocoaPods"
+    )
 
 
-_CACHE = (f"{_cache_dir()}/*",)
+COCOAPODS_CACHE_FILES = f"{cocoapods_cache_directory()}/*"
 
 PLUGIN = Plugin(
     name="cocoapods",
     description="CocoaPods download cache",
-    platforms=frozenset({"darwin"}),
-    requires="pod",
+    operating_systems=(OperatingSystem.MACOS,),
+    requires_on_path="pod",
     actions=(
         Action(
             name="cache",
-            tier=Tier.CAUTION,
-            help="Wipe the pod download cache. Pods download again on next `pod install`.",
-            command=("pod", "cache", "clean", "--all"),
-            paths=_CACHE,
+            risk_level=RiskLevel.CAUTION,
+            description="Wipe the pod download cache. Pods download again on next `pod install`.",
+            cleanup=RunCommand("pod", "cache", "clean", "--all"),
+            size=SizeOfPaths(COCOAPODS_CACHE_FILES),
         ),
     ),
 )

@@ -3,15 +3,31 @@
 import logging
 import re
 import stat
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass, field
+from functools import partial
 from os import PathLike
 from pathlib import Path
 
 from nclutils.sh import ShellCommandError, run_command
 
-from purger.config import PluginSettings
 from purger.details import action_details
-from purger.plugin import Action, Plugin, Tier
+from purger.plugin import (
+    Action,
+    DeletePaths,
+    FoundBy,
+    Plugin,
+    PluginSettings,
+    RiskLevel,
+    SizeComputedBy,
+    SizeOfDirectoryPrintedBy,
+    SizeOfPaths,
+    SizeReportedByCommand,
+    SizeSource,
+    SizeUnknown,
+    _PathSelection,
+    first_report_of,
+)
 from purger.reports import ActionReport, PluginReport, sum_known
 from purger.safety import has_symlinked_parent, invoking_home
 
@@ -20,12 +36,10 @@ logger = logging.getLogger(__name__)
 _SIZE_PATTERN = re.compile(r"^\s*([0-9]*\.?[0-9]+)\s*([a-zA-Z]*)\s*$")
 GLOB_CHARS = frozenset("*?[")
 _BLOCK_BYTES = 512
-SIZE_CMD_TIMEOUT_SECONDS = 120
+SIZE_COMMAND_TIMEOUT_SECONDS = 120
 
 # Size command outputs keyed by command, with None for a command that failed.
 type _SizeOutputs = dict[tuple[str, ...], str | None]
-# The literal paths of each prepared action, keyed by action name.
-type PreparedPaths = Mapping[str, tuple[Path, ...]]
 _UNITS: dict[str, int] = {
     "": 1,
     "b": 1,
@@ -121,6 +135,32 @@ def expand_paths(patterns: Sequence[str]) -> list[Path]:
     return sorted(found)
 
 
+def any_path_exists(patterns: Sequence[str]) -> bool:
+    """Report whether any pattern names an existing path, stopping at the first match.
+
+    Use it for a cheap `skip_unless` check, since it neither lists nor sorts
+    every match the way `expand_paths` does. Patterns expand as in `expand_paths`.
+
+    Args:
+        patterns: Literal paths or glob patterns.
+
+    Returns:
+        bool: True when at least one pattern matches a path, including a dangling symlink.
+    """
+    for pattern in patterns:
+        try:
+            base, glob = _split_pattern(pattern)
+        except RuntimeError as exc:
+            logger.debug("cannot expand %s: %s", pattern, exc)
+            continue
+        if glob is None:
+            if base.exists() or base.is_symlink():
+                return True
+        elif next(base.glob(glob), None) is not None:
+            return True
+    return False
+
+
 def disk_usage(paths: Iterable[Path]) -> int:
     """Sum the allocated disk space of paths without following symlinks.
 
@@ -169,7 +209,19 @@ def disk_usage_by_path(paths: Iterable[Path]) -> dict[Path, int]:
     return sizes
 
 
-def printed_dir(output: str, *, single_line: bool = False) -> Path:
+def nonblank_lines(output: str) -> list[str]:
+    """Split command output into its lines, stripped, leaving out blank ones.
+
+    Args:
+        output: Text a command printed.
+
+    Returns:
+        list[str]: Each non-blank line without surrounding whitespace.
+    """
+    return [stripped for line in output.splitlines() if (stripped := line.strip())]
+
+
+def printed_directory(output: str, *, single_line: bool = False) -> Path:
     """Read the directory a tool prints, such as `npm config get cache`, at its real path.
 
     Args:
@@ -184,7 +236,7 @@ def printed_dir(output: str, *, single_line: bool = False) -> Path:
         ValueError: If the output does not name an absolute path, or holds
             several lines when `single_line` is set.
     """
-    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    lines = nonblank_lines(output)
     if single_line and len(lines) != 1:
         msg = f"expected one absolute directory, got {output!r}"
         raise ValueError(msg)
@@ -195,35 +247,23 @@ def printed_dir(output: str, *, single_line: bool = False) -> Path:
     return directory.resolve()
 
 
-def printed_dir_usage(output: str, patterns: Sequence[str] = ()) -> int:
+def _printed_directory_usage(output: str, *, subpaths: Sequence[str]) -> int:
     """Measure the directory a tool prints, such as `npm config get cache`.
-
-    Use it as a `parse_size` hook, so a plugin sizes the directory the tool
-    actually uses rather than a guessed default location.
 
     Args:
         output: Tool output whose first non-blank line is an absolute directory.
-        patterns: Globs relative to that directory. Empty measures the whole directory.
+        subpaths: Globs relative to that directory. Empty measures the whole directory.
 
     Returns:
         int: Allocated bytes, or 0 when the directory does not exist.
+
+    Raises:
+        ValueError: If the output does not name an absolute directory.
     """
-    directory = printed_dir(output)
-    if not patterns:
+    directory = printed_directory(output)
+    if not subpaths:
         return disk_usage([directory])
-    return disk_usage(match for pattern in patterns for match in directory.glob(pattern))
-
-
-def _parse_int(text: str) -> int:
-    return int(text.strip())
-
-
-def _non_negative(label: str, size: int) -> int | None:
-    """Treat a negative size as unknown."""
-    if size < 0:
-        logger.debug("negative size %d for %s treated as unknown", size, label)
-        return None
-    return size
+    return disk_usage(match for pattern in subpaths for match in directory.glob(pattern))
 
 
 def _guarded(label: str, size_fn: Callable[[], int | None]) -> int | None:
@@ -233,13 +273,16 @@ def _guarded(label: str, size_fn: Callable[[], int | None]) -> int | None:
     except Exception as exc:  # noqa: BLE001 - plugin-supplied code can raise anything
         logger.debug("cannot size %s: %s", label, exc)
         return None
-    return None if size is None else _non_negative(label=label, size=size)
+    if size is not None and size < 0:
+        logger.debug("negative size %d for %s treated as unknown", size, label)
+        return None
+    return size
 
 
-def _size_cmd_output(label: str, cmd: tuple[str, ...]) -> str | None:
+def _size_command_output(label: str, command: tuple[str, ...]) -> str | None:
     """Run a size command and return its output, or None when it fails."""
     try:
-        return run_command(list(cmd), timeout=SIZE_CMD_TIMEOUT_SECONDS).stdout
+        return run_command(list(command), timeout=SIZE_COMMAND_TIMEOUT_SECONDS).stdout
     except ShellCommandError as exc:
         logger.debug("size command for %s failed: %s", label, exc)
     except UnicodeDecodeError as exc:
@@ -247,20 +290,11 @@ def _size_cmd_output(label: str, cmd: tuple[str, ...]) -> str | None:
     return None
 
 
-def _run_size_cmd(
-    label: str,
-    cmd: tuple[str, ...],
-    parser: Callable[[str], int] | None,
-    *,
-    outputs: _SizeOutputs,
-) -> int | None:
-    """Parse a size command's output, running the command only if outputs lacks it."""
-    if cmd not in outputs:
-        outputs[cmd] = _size_cmd_output(label=label, cmd=cmd)
-    stdout = outputs[cmd]
-    if stdout is None:
-        return None
-    return _guarded(label=label, size_fn=lambda: (parser or _parse_int)(stdout))
+def _command_output(label: str, command: tuple[str, ...], *, outputs: _SizeOutputs) -> str | None:
+    """Return a size command's output, running the command only if outputs lacks it."""
+    if command not in outputs:
+        outputs[command] = _size_command_output(label=label, command=command)
+    return outputs[command]
 
 
 def _deletable_matches(paths: Iterable[Path]) -> list[Path]:
@@ -281,96 +315,6 @@ def _deletable_matches(paths: Iterable[Path]) -> list[Path]:
     return kept
 
 
-def measure_action(
-    action: Action,
-    *,
-    size_outputs: _SizeOutputs | None = None,
-    prepared: Sequence[Path] = (),
-    settings: PluginSettings | None = None,
-) -> ActionReport:
-    """Measure one action, preferring its size hook, then size_cmd, then its paths.
-
-    Args:
-        action: The action to measure.
-        size_outputs: Outputs of size commands already run in this measurement,
-            so a command that several sizes read runs only once.
-        prepared: The literal paths the plugin's `prepare` hook returned for a
-            `prepared` action. Ignored for other actions.
-        settings: The plugin's settings for this run. When given, the report
-            also carries detail rows built from each path's size.
-
-    Returns:
-        ActionReport: The size in bytes (None when unknown), the resolved paths,
-            and the detail rows when settings were given.
-    """
-    if action.prepared:
-        resolved = _deletable_matches(prepared)
-        has_paths = True
-    else:
-        patterns = _path_patterns(action)
-        resolved = _deletable_matches(expand_paths(patterns)) if patterns else []
-        has_paths = patterns is not None and bool(action.paths)
-    # Per-path sizes come from one walk, which also gives the size of a path action.
-    sizes = disk_usage_by_path(resolved) if settings is not None and resolved else None
-    size: int | None = None
-    if action.size is not None:
-        size = _guarded(label=action.name, size_fn=action.size)
-    elif action.size_cmd is not None:
-        size = _run_size_cmd(
-            label=action.name,
-            cmd=action.size_cmd,
-            parser=action.parse_size,
-            outputs={} if size_outputs is None else size_outputs,
-        )
-    elif has_paths:
-        size = disk_usage(resolved) if sizes is None else sum(sizes.values())
-    report = ActionReport(action=action, size_bytes=size, resolved_paths=resolved)
-    if settings is not None and (sizes or action.details is not None):
-        report.details = action_details(action=action, sizes=sizes or {}, settings=settings)
-    return report
-
-
-def _path_patterns(action: Action) -> tuple[str, ...] | None:
-    """Return the action's path globs, calling its paths function when it has one.
-
-    Returns:
-        tuple[str, ...] | None: The globs, or None when the paths function fails.
-    """
-    if isinstance(action.paths, tuple):
-        return action.paths
-    try:
-        return tuple(action.paths())
-    except Exception as exc:  # noqa: BLE001 - plugin-supplied code can raise anything
-        logger.debug("cannot list paths for %s: %s", action.name, exc)
-        return None
-
-
-def _included_actions(plugin: Plugin, *, include_dangerous: bool) -> list[Action]:
-    return [a for a in plugin.actions if include_dangerous or a.tier is not Tier.DANGEROUS]
-
-
-def _footprint(plugin: Plugin, reports: list[ActionReport], outputs: _SizeOutputs) -> int | None:
-    """Combine the plugin's own size, or else its action sizes, into one footprint."""
-    if not plugin.has_own_footprint:
-        return sum_known(r.size_bytes for r in reports)
-    if plugin.size is not None:
-        own = _guarded(label=plugin.name, size_fn=plugin.size)
-    elif plugin.size_cmd is not None:
-        own = _run_size_cmd(
-            label=plugin.name, cmd=plugin.size_cmd, parser=plugin.parse_size, outputs=outputs
-        )
-    else:
-        own = disk_usage(expand_paths(plugin.paths))
-    if own is None:
-        return None
-    outside = sum_known(r.size_bytes for r in reports if r.action.outside_footprint)
-    return own + (outside or 0)
-
-
-class NotConfiguredError(Exception):
-    """Raised when a plugin's prepare hook reports that a required setting is missing."""
-
-
 def _as_path(item: object) -> Path:
     """Convert one returned path, rejecting anything that is not an absolute string or path.
 
@@ -389,78 +333,170 @@ def _as_path(item: object) -> Path:
     return path
 
 
-def _checked_prepared(plugin: Plugin, result: object) -> dict[str, tuple[Path, ...]]:
-    """Validate a prepare hook's result and coerce each value to a tuple of paths.
+def _found_paths(
+    found_by: FoundBy, *, label: str, settings: PluginSettings, deleted: bool
+) -> list[Path] | None:
+    """Run a plugin's `found_by` and check that it returned absolute paths.
 
-    Paths for a name that is no prepared action of the plugin are logged and dropped,
-    since no action would ever measure or delete them.
-
-    Raises:
-        TypeError: If the result is not a mapping of action names to iterables of paths.
-    """
-    if not isinstance(result, Mapping):
-        msg = f"expected a mapping of action names to paths, got {type(result).__name__}"
-        raise TypeError(msg)
-    prepared_names = {action.name for action in plugin.actions if action.prepared}
-    checked: dict[str, tuple[Path, ...]] = {}
-    for name, value in result.items():
-        if not isinstance(name, str):
-            msg = f"expected an action name, got {name!r}"
-            raise TypeError(msg)
-        # A string is iterable, so it would otherwise split into one-character paths.
-        if isinstance(value, str | bytes):
-            msg = f"expected paths for {name!r}, got {value!r}"
-            raise TypeError(msg)
-        paths = tuple(_as_path(item) for item in value)
-        if name not in prepared_names:
-            logger.warning(
-                "prepare for %s returned paths for %r, which is not a prepared action",
-                plugin.name,
-                name,
-            )
-            continue
-        checked[name] = paths
-    return checked
-
-
-def _prepare(plugin: Plugin, settings: PluginSettings) -> PreparedPaths | None:
-    """Run the plugin's prepare hook with its settings for this run.
-
-    A hook that raises or returns a malformed result is logged and the plugin
-    continues with no prepared paths, so plugin-supplied code cannot abort the
-    whole run.
+    A failure is a warning when purger deletes the paths, and a debug line when
+    the tool's own command deletes them and purger only sizes them.
 
     Returns:
-        PreparedPaths | None: The paths by action name, empty when the plugin
-            has no hook or the hook failed, or None when the hook reports the
-            plugin as not configured.
+        list[Path] | None: The paths once each, or None when the function raised
+            or returned anything but absolute paths, so the action offers nothing.
     """
-    if plugin.prepare is None:
-        return {}
     try:
-        result = plugin.prepare(settings)
-        return None if result is None else _checked_prepared(plugin=plugin, result=result)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("prepare for %s failed: %s", plugin.name, exc)
-        return {}
+        found = found_by(settings)
+        # A string is iterable, so it would otherwise split into one-character paths.
+        if isinstance(found, str | bytes):
+            msg = f"expected paths, got {found!r}"
+            raise TypeError(msg)  # noqa: TRY301 - one log line for every bad result
+        # A path returned twice would be counted and listed twice.
+        return list(dict.fromkeys(_as_path(item) for item in found))
+    except Exception as exc:  # noqa: BLE001 - plugin-supplied code can raise anything
+        if not deleted:
+            logger.debug("cannot find paths for %s: %s", label, exc)
+        elif first_report_of(exc):
+            logger.warning("cannot find paths for %s: %s", label, exc)
+        return None
 
 
-def _measure_actions(
-    actions: Iterable[Action],
-    *,
-    outputs: _SizeOutputs,
-    prepared_paths: PreparedPaths,
-    settings: PluginSettings | None = None,
-) -> list[ActionReport]:
-    return [
-        measure_action(
-            action,
-            size_outputs=outputs,
-            prepared=prepared_paths.get(action.name, ()),
+def _matches(
+    selection: _PathSelection, *, label: str, settings: PluginSettings
+) -> list[Path] | None:
+    """Return what a path selection names on disk, or None when its `found_by` failed."""
+    if selection.found_by is not None:
+        return _found_paths(
+            selection.found_by,
+            label=label,
             settings=settings,
+            deleted=isinstance(selection, DeletePaths),
         )
-        for action in actions
+    return expand_paths(selection.globs)
+
+
+@dataclass(frozen=True)
+class _Measurement:
+    """A measured size, with the paths it covers and each path's share when it came from paths."""
+
+    size_bytes: int | None
+    paths: list[Path] = field(default_factory=list)
+    path_sizes: dict[Path, int] = field(default_factory=dict)
+
+
+def _measure_paths(paths: list[Path]) -> _Measurement:
+    """Measure paths in one walk that also gives each path's share for detail rows."""
+    path_sizes = disk_usage_by_path(paths)
+    return _Measurement(size_bytes=sum(path_sizes.values()), paths=paths, path_sizes=path_sizes)
+
+
+def _measure_size(
+    source: SizeSource | None,
+    *,
+    label: str,
+    settings: PluginSettings,
+    outputs: _SizeOutputs,
+) -> _Measurement:
+    """Measure one size object, with an unknown size when it is unknown or cannot be read."""
+    size: int | None = None
+    match source:
+        case SizeOfPaths():
+            matches = _matches(source, label=label, settings=settings)
+            return _Measurement(size_bytes=None) if matches is None else _measure_paths(matches)
+        case SizeComputedBy(function=function):
+            size = _guarded(label=label, size_fn=function)
+        case SizeReportedByCommand(command=command, read_size=read_size):
+            stdout = _command_output(label=label, command=command, outputs=outputs)
+            if stdout is not None:
+                size = _guarded(label=label, size_fn=partial(read_size, stdout))
+        case SizeOfDirectoryPrintedBy(command=command, subpaths=subpaths):
+            stdout = _command_output(label=label, command=command, outputs=outputs)
+            if stdout is not None:
+                read = partial(_printed_directory_usage, stdout, subpaths=subpaths)
+                size = _guarded(label=label, size_fn=read)
+        case None | SizeUnknown():
+            pass
+    return _Measurement(size_bytes=size)
+
+
+def measure_action(
+    action: Action,
+    *,
+    settings: PluginSettings,
+    size_outputs: _SizeOutputs | None = None,
+    with_details: bool = False,
+) -> ActionReport:
+    """Measure one action and resolve the paths it deletes or is sized by.
+
+    Args:
+        action: The action to measure.
+        settings: The plugin's settings for this run, which `found_by` functions receive.
+        size_outputs: Outputs of size commands already run in this measurement,
+            so a command that several sizes read runs only once.
+        with_details: Also build the rows that break the size down.
+
+    Returns:
+        ActionReport: The size in bytes (None when unknown), the resolved paths,
+            and the detail rows when asked for.
+    """
+    if isinstance(action.cleanup, DeletePaths):
+        matches = _matches(action.cleanup, label=action.name, settings=settings)
+        # Deleting nothing frees nothing, so a failed `found_by` offers nothing.
+        measured = (
+            _Measurement(size_bytes=0)
+            if matches is None
+            else _measure_paths(_deletable_matches(matches))
+        )
+    else:
+        measured = _measure_size(
+            action.size,
+            label=action.name,
+            settings=settings,
+            outputs={} if size_outputs is None else size_outputs,
+        )
+    report = ActionReport(
+        action=action, size_bytes=measured.size_bytes, resolved_paths=measured.paths
+    )
+    if with_details and (measured.path_sizes or action.size_breakdown is not None):
+        report.details = action_details(action=action, sizes=measured.path_sizes, settings=settings)
+    return report
+
+
+def _actions_to_measure(
+    plugin: Plugin, *, include_dangerous: bool, total_only: bool
+) -> list[Action]:
+    """Pick the actions a measurement of the plugin includes.
+
+    DANGEROUS actions count only when asked for. When only the plugin's size
+    is wanted and the plugin sets `total_size`, the only actions that matter
+    are those marked `adds_to_plugin_total_size`.
+
+    Args:
+        plugin: The plugin being measured.
+        include_dangerous: Include DANGEROUS actions when true.
+        total_only: Measure only what the plugin's size needs.
+    """
+    return [
+        action
+        for action in plugin.actions
+        if (include_dangerous or action.risk_level is not RiskLevel.DANGEROUS)
+        and (not total_only or plugin.total_size is None or action.adds_to_plugin_total_size)
     ]
+
+
+def _plugin_total(
+    plugin: Plugin, *, reports: list[ActionReport], settings: PluginSettings, outputs: _SizeOutputs
+) -> int | None:
+    """Combine the plugin's total size, or else its action sizes, into one figure."""
+    if plugin.total_size is None:
+        return sum_known(r.size_bytes for r in reports)
+    own = _measure_size(
+        plugin.total_size, label=plugin.name, settings=settings, outputs=outputs
+    ).size_bytes
+    if own is None:
+        return None
+    outside = sum_known(r.size_bytes for r in reports if r.action.adds_to_plugin_total_size)
+    return own + (outside or 0)
 
 
 def measure_plugin(
@@ -468,65 +504,56 @@ def measure_plugin(
 ) -> PluginReport:
     """Measure a plugin and its actions.
 
-    The footprint is the plugin's own size when it declares one, plus the known
-    sizes of measured actions marked `outside_footprint`. Without its own size,
-    the footprint is the sum of its known action sizes. A size command shared by
-    the plugin and its actions runs once. The `prepare` hook runs first, and
-    `prepared` actions measure the paths it returned.
+    The plugin's size is its `total_size` when it declares one, plus the known
+    sizes of measured actions marked `adds_to_plugin_total_size`. Without a
+    `total_size`, it is the sum of the known action sizes. A size command shared
+    by the plugin and its actions runs once.
 
     Args:
         plugin: The plugin to measure.
         include_dangerous: Include DANGEROUS actions when true.
-        settings: The plugin's settings for this run, handed to `prepare`.
-        with_details: Also build each action's detail rows, which costs a
-            per-path walk for actions sized another way.
+        settings: The plugin's settings for this run.
+        with_details: Also build each action's detail rows.
 
     Returns:
-        PluginReport: The footprint, per-action reports, and the prepared paths.
-
-    Raises:
-        NotConfiguredError: If the `prepare` hook reports the plugin as not configured.
+        PluginReport: The plugin's size, per-action reports, and the settings measured with.
     """
-    prepared_paths = _prepare(plugin=plugin, settings=settings)
-    if prepared_paths is None:
-        msg = f"plugin {plugin.name!r} is not configured"
-        raise NotConfiguredError(msg)
     outputs: _SizeOutputs = {}
-    reports = _measure_actions(
-        _included_actions(plugin, include_dangerous=include_dangerous),
-        outputs=outputs,
-        prepared_paths=prepared_paths,
-        settings=settings if with_details else None,
-    )
+    reports = [
+        measure_action(action, settings=settings, size_outputs=outputs, with_details=with_details)
+        for action in _actions_to_measure(
+            plugin, include_dangerous=include_dangerous, total_only=False
+        )
+    ]
     return PluginReport(
         plugin=plugin,
-        footprint_bytes=_footprint(plugin=plugin, reports=reports, outputs=outputs),
+        total_size_bytes=_plugin_total(plugin, reports=reports, settings=settings, outputs=outputs),
         actions=reports,
-        prepared_paths=prepared_paths,
+        settings=settings,
     )
 
 
-def measure_footprint(
-    plugin: Plugin, *, include_dangerous: bool, prepared_paths: PreparedPaths
+def measure_total_size(
+    plugin: Plugin, *, include_dangerous: bool, settings: PluginSettings
 ) -> int | None:
-    """Measure only a plugin's footprint, as `measure_plugin` would report it.
+    """Measure only a plugin's size, as `measure_plugin` would report it.
 
-    Use this to re-measure after a cleanup: a plugin that sizes itself skips
-    every action except those marked `outside_footprint`. The `prepare` hook
-    does not run again; `prepared` actions re-measure the given paths, so freed
-    space compares the same paths before and after.
+    Use this to re-measure after a cleanup: a plugin with a `total_size` skips
+    every action except those marked `adds_to_plugin_total_size`. A scan that
+    runs `once_per_run` is not repeated, so freed space compares the same paths
+    before and after.
 
     Args:
         plugin: The plugin to measure.
         include_dangerous: Include DANGEROUS actions when true.
-        prepared_paths: The prepared paths from the plugin's first measurement.
+        settings: The plugin's settings from its first measurement.
 
     Returns:
-        int | None: The footprint in bytes, or None when unknown.
+        int | None: The size in bytes, or None when unknown.
     """
-    actions = _included_actions(plugin, include_dangerous=include_dangerous)
-    if plugin.has_own_footprint:
-        actions = [action for action in actions if action.outside_footprint]
+    actions = _actions_to_measure(plugin, include_dangerous=include_dangerous, total_only=True)
     outputs: _SizeOutputs = {}
-    reports = _measure_actions(actions, outputs=outputs, prepared_paths=prepared_paths)
-    return _footprint(plugin=plugin, reports=reports, outputs=outputs)
+    reports = [
+        measure_action(action, settings=settings, size_outputs=outputs) for action in actions
+    ]
+    return _plugin_total(plugin, reports=reports, settings=settings, outputs=outputs)

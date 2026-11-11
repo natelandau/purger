@@ -13,13 +13,14 @@ from nclutils.sh import ShellCommandError
 from pytest_mock import MockerFixture
 
 from purger import safety
-from purger.config import Config, ConfigError, PluginSettings, load_config
-from purger.plugin import SettingValue, Tier
+from purger.config import Config, ConfigError, load_config
+from purger.plugin import PluginSettings, RiskLevel, SettingValue, reset_run_caches
 from purger.plugins import _projects_scan as scanner
 from purger.plugins import projects
 from purger.plugins._projects_scan import BUILTIN_RULES, Category, ScanOptions, scan
 from purger.plugins.projects import PLUGIN
-from purger.sizing import NotConfiguredError, measure_footprint, measure_plugin
+from purger.registry import is_configured
+from purger.sizing import measure_plugin, measure_total_size
 
 NOW = 1_800_000_000.0
 DAY = 86400
@@ -1121,9 +1122,7 @@ def test_not_configured_without_paths(home: Path) -> None:
     settings = configure()
 
     # When / Then
-    assert projects._prepare(settings) is None
-    with pytest.raises(NotConfiguredError):
-        measure_plugin(PLUGIN, include_dangerous=False, settings=settings)
+    assert not is_configured(PLUGIN, settings)
 
 
 def test_not_configured_without_a_home_folder(mocker: MockerFixture) -> None:
@@ -1132,7 +1131,8 @@ def test_not_configured_without_a_home_folder(mocker: MockerFixture) -> None:
     mocker.patch.object(projects, "invoking_home", side_effect=RuntimeError("no home"))
 
     # When / Then
-    assert projects._prepare(configure(paths=("~/repos",))) is None
+    assert not projects.has_usable_project_folder(configure(paths=("~/repos",)))
+    assert not is_configured(PLUGIN, configure(paths=("~/repos",)))
 
 
 @pytest.mark.parametrize("kind", ["relative", "outside", "home", "missing", "symlink", "dotdot"])
@@ -1160,34 +1160,47 @@ def test_bad_roots_are_ignored_with_a_warning(
 
     # Then
     assert roots == ()
-    assert projects._prepare(configure(paths=(bad,))) is None
+    assert not projects.has_usable_project_folder(configure(paths=(bad,)))
     assert any(bad in call.args[0] and reason in call.args[0] for call in warning.call_args_list)
 
     # When a good root is added
     good = home / "repos"
 
     # Then
-    assert projects._prepare(configure(paths=(bad, str(good)))) is not None
+    assert projects.has_usable_project_folder(configure(paths=(bad, str(good))))
+
+
+def _check_and_measure(settings: PluginSettings) -> None:
+    """Run the configuration check and the measurement, as one purger command does."""
+    reset_run_caches()
+    if is_configured(PLUGIN, settings):
+        measure_plugin(PLUGIN, include_dangerous=False, settings=settings)
 
 
 def test_bad_root_warns_once_per_run(home: Path, mocker: MockerFixture) -> None:
-    """Verify a bad root warns once in a run, even when listed twice, and again in the next run."""
-    # Given
+    """Verify each bad root warns once in a run, even when listed twice, and again in the next run."""
+    # Given good and bad roots
+    (home / "repos").mkdir()
     warning = mocker.patch.object(projects.pp, "warning")
-    bad = str(home / "nowhere")
-    settings = configure(paths=(bad, bad))
+    mocker.patch.object(projects, "scan", return_value=empty())
+    missing = str(home / "nowhere")
+    relative = "repos"
+    settings = configure(paths=(missing, str(home / "repos"), missing, relative))
 
     # When
-    projects._prepare(settings)
+    _check_and_measure(settings)
 
     # Then
-    assert warning.call_count == 1
+    messages = [call.args[0] for call in warning.call_args_list]
+    assert len(messages) == 2
+    assert any(missing in message for message in messages)
+    assert any(relative in message for message in messages)
 
     # When a second run starts
-    projects._prepare(settings)
+    _check_and_measure(settings)
 
     # Then
-    assert warning.call_count == 2
+    assert warning.call_count == 4
 
 
 def test_tilde_expands_against_the_invoking_home(home: Path) -> None:
@@ -1231,7 +1244,7 @@ def test_overlapping_roots_scan_once(home: Path, git: GitMock) -> None:
 
 
 def test_measure_plugin_reports_each_category(home: Path, git: GitMock) -> None:
-    """Verify each action lists the paths of its own category with its tier."""
+    """Verify each action lists the paths of its own category with its risk level."""
     # Given
     project = home / "repos" / "app"
     cache = make_cache(project)
@@ -1252,11 +1265,11 @@ def test_measure_plugin_reports_each_category(home: Path, git: GitMock) -> None:
     assert by_name["dependencies"].resolved_paths == [deps.resolve()]
     assert by_name["builds"].resolved_paths == []
     assert by_name["custom"].resolved_paths == [custom.resolve()]
-    assert [a.action.tier for a in report.actions] == [
-        Tier.SAFE,
-        Tier.CAUTION,
-        Tier.CAUTION,
-        Tier.CAUTION,
+    assert [a.action.risk_level for a in report.actions] == [
+        RiskLevel.SAFE,
+        RiskLevel.CAUTION,
+        RiskLevel.CAUTION,
+        RiskLevel.CAUTION,
     ]
 
 
@@ -1274,10 +1287,10 @@ def test_glob_characters_in_names_survive(home: Path, git: GitMock) -> None:
     assert caches.resolved_paths == [cache.resolve()]
 
 
-def test_measure_footprint_remeasures_without_rescanning(
+def test_measure_total_size_remeasures_without_rescanning(
     home: Path, git: GitMock, mocker: MockerFixture
 ) -> None:
-    """Verify the footprint after a cleanup re-measures the scanned paths without a new scan."""
+    """Verify the total size after a cleanup re-measures the scanned paths without a new scan."""
     # Given
     project = home / "repos" / "app"
     first = make_cache(project)
@@ -1286,23 +1299,22 @@ def test_measure_footprint_remeasures_without_rescanning(
     touch(second / "big", "x" * 100_000)
     age(project, STALE)
     spy = mocker.patch.object(projects, "scan", wraps=projects.scan)
-    report = measure_plugin(
-        PLUGIN, include_dangerous=False, settings=configure(paths=(str(home / "repos"),))
-    )
-    before = report.footprint_bytes
+    settings = configure(paths=(str(home / "repos"),))
+    report = measure_plugin(PLUGIN, include_dangerous=False, settings=settings)
+    before = report.total_size_bytes
     assert before is not None
 
     # When
     for child in second.iterdir():
         child.unlink()
     second.rmdir()
-    after = measure_footprint(PLUGIN, include_dangerous=False, prepared_paths=report.prepared_paths)
+    after = measure_total_size(PLUGIN, include_dangerous=False, settings=settings)
 
     # Then
     assert after is not None
     assert after < before
     assert spy.call_count == 1
-    assert report.prepared_paths["caches"] == tuple(sorted((first.resolve(), second.resolve())))
+    assert projects.project_caches(settings) == tuple(sorted((first.resolve(), second.resolve())))
 
 
 def test_failed_scan_leaves_the_plugin_with_no_paths(
@@ -1319,10 +1331,9 @@ def test_failed_scan_leaves_the_plugin_with_no_paths(
     )
 
     # Then
-    assert report.prepared_paths == {}
     assert all(action.resolved_paths == [] for action in report.actions)
-    assert report.footprint_bytes == 0
-    assert any("prepare for projects failed" in r.getMessage() for r in caplog.records)
+    assert report.total_size_bytes == 0
+    assert any("cannot find paths for caches" in r.getMessage() for r in caplog.records)
 
 
 def test_exclude_splits_paths_and_names(home: Path, mocker: MockerFixture) -> None:
@@ -1336,7 +1347,7 @@ def test_exclude_splits_paths_and_names(home: Path, mocker: MockerFixture) -> No
     spy = mocker.patch.object(projects, "scan", return_value=empty())
 
     # When
-    projects._prepare(settings)
+    projects.project_folders(settings)
 
     # Then
     scan_options = spy.call_args.args[0]
@@ -1358,8 +1369,10 @@ def test_relative_exclude_is_a_config_error(tmp_path: Path, entry: str) -> None:
         load_config({"projects": PLUGIN}, env={"PURGER_CONFIG": str(config_file)})
 
 
-def test_prepare_returns_paths_for_its_own_settings_only(home: Path, mocker: MockerFixture) -> None:
-    """Verify each prepare call scans the roots of the settings it was given, sharing no state."""
+def test_project_folders_scan_the_roots_of_their_own_settings(
+    home: Path, mocker: MockerFixture
+) -> None:
+    """Verify each settings value scans its own roots, sharing no results with another."""
     # Given
     (home / "a").mkdir()
     (home / "b").mkdir()
@@ -1372,15 +1385,13 @@ def test_prepare_returns_paths_for_its_own_settings_only(home: Path, mocker: Moc
     second = configure(paths=(str(home / "b"),))
 
     # When
-    from_first = projects._prepare(first)
-    from_second = projects._prepare(second)
+    from_first = projects.project_caches(first)
+    from_second = projects.project_caches(second)
 
     # Then
-    assert from_first is not None
-    assert from_second is not None
-    assert from_first["caches"] == ((home / "a").resolve() / "cache",)
-    assert from_second["caches"] == ((home / "b").resolve() / "cache",)
-    assert set(from_first) == {a.name for a in PLUGIN.actions if a.prepared}
+    assert from_first == ((home / "a").resolve() / "cache",)
+    assert from_second == ((home / "b").resolve() / "cache",)
+    assert [a.name for a in PLUGIN.actions] == [category.value for category in Category]
 
 
 def test_builds_lists_untracked_dist_in_a_git_project(home: Path, git: GitMock) -> None:
@@ -1549,14 +1560,14 @@ def test_details_group_by_project_with_counts(home: Path) -> None:
     }
 
     # When
-    rows = projects._details(sizes, configure(paths=("~/code",)))
+    rows = projects.one_row_per_project(sizes, configure(paths=("~/code",)))
 
     # Then
     assert len(rows) == 1
     assert rows[0].label == "proj"
     assert rows[0].size_bytes == 103
-    assert rows[0].items == (".venv", "2 __pycache__")
-    assert rows[0].key == str(project)
+    assert rows[0].item_names == (".venv", "2 __pycache__")
+    assert rows[0].merge_key == str(project)
 
 
 def test_details_two_roots_same_name_stay_apart(home: Path, mocker: MockerFixture) -> None:
@@ -1568,7 +1579,46 @@ def test_details_two_roots_same_name_stay_apart(home: Path, mocker: MockerFixtur
     sizes = {home / "code" / "foo" / ".venv": 10, home / "work" / "foo" / ".venv": 20}
 
     # When
-    rows = projects._details(sizes, configure(paths=("~/code", "~/work")))
+    rows = projects.one_row_per_project(sizes, configure(paths=("~/code", "~/work")))
 
     # Then
     assert sorted(row.label for row in rows) == ["~/code/foo", "~/work/foo"]
+
+
+def test_not_configured_when_every_path_is_rejected(home: Path, mocker: MockerFixture) -> None:
+    """Verify the plugin is skipped as not configured when no configured folder is usable."""
+    # Given
+    (home / "repos").mkdir()
+    warning = mocker.patch.object(projects.pp, "warning")
+    scan_spy = mocker.patch.object(projects, "scan", return_value=empty())
+
+    missing = str(home / "nowhere")
+
+    # When / Then
+    assert not is_configured(PLUGIN, configure(paths=(missing,)))
+    assert warning.call_count == 1
+    assert missing in warning.call_args.args[0]
+    assert "not an existing folder" in warning.call_args.args[0]
+    assert projects.has_usable_project_folder(configure(paths=(str(home / "repos"),)))
+    assert scan_spy.call_count == 0
+
+
+def test_projects_actions_find_paths_from_one_scan(
+    home: Path, git: GitMock, mocker: MockerFixture
+) -> None:
+    """Verify every action reads its folders from one shared scan per run."""
+    # Given
+    project = home / "repos" / "app"
+    cache = make_cache(project)
+    spy = mocker.patch.object(projects, "scan", wraps=projects.scan)
+    settings = configure(paths=(str(home / "repos"),))
+
+    # When
+    report = measure_plugin(PLUGIN, include_dangerous=False, settings=settings)
+
+    # Then
+    assert spy.call_count == 1
+    caches = next(a for a in report.actions if a.action.name == "caches")
+    assert caches.resolved_paths == [cache.resolve()]
+    assert projects.project_caches(settings) == (cache.resolve(),)
+    assert spy.call_count == 1

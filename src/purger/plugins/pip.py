@@ -1,11 +1,17 @@
 """Plugin for the pip download and wheel cache."""
 
-from purger.plugin import Action, Plugin, Tier
-from purger.plugins._shared import env_dir, program_matcher
-from purger.sizing import expand_paths
+from purger.plugin import (
+    Action,
+    DeletePaths,
+    Plugin,
+    RiskLevel,
+    program_matching,
+    user_cache_folders,
+)
+from purger.sizing import any_path_exists
 
 
-def _cache_patterns() -> tuple[str, ...]:
+def pip_cache_globs() -> tuple[str, ...]:
     """List the pip cache contents to delete, as glob-safe patterns.
 
     Deleted by path so a cache left behind after pip itself is gone still gets
@@ -15,33 +21,32 @@ def _cache_patterns() -> tuple[str, ...]:
     Returns:
         tuple[str, ...]: Cache content patterns, without duplicates.
     """
-    xdg_cache = env_dir("XDG_CACHE_HOME", "~/.cache")
-    return tuple(dict.fromkeys(("~/Library/Caches/pip/*", "~/.cache/pip/*", f"{xdg_cache}/pip/*")))
+    return tuple(f"{folder}/*" for folder in user_cache_folders("pip"))
 
 
-_CACHE_PATHS = _cache_patterns()
+PIP_CACHE_GLOBS = pip_cache_globs()
 
 
-def _has_cache() -> bool:
+def pip_cache_exists() -> bool:
     """Report whether a pip cache exists, since the plugin does not need pip installed.
 
     Returns:
         bool: True when any cache path has contents.
     """
-    return bool(expand_paths(_CACHE_PATHS))
+    return any_path_exists(PIP_CACHE_GLOBS)
 
 
 PLUGIN = Plugin(
     name="pip",
     description="pip download and wheel cache",
-    is_available=_has_cache,
-    busy_process=program_matcher(r"pip(3(\.\d+)?)?"),
+    skip_unless=pip_cache_exists,
+    skip_while_running=program_matching(r"pip(3(\.\d+)?)?"),
     actions=(
         Action(
             name="cache",
-            tier=Tier.CAUTION,
-            help="Wipe the pip cache. Packages download and build again on next install.",
-            paths=_CACHE_PATHS,
+            risk_level=RiskLevel.CAUTION,
+            description="Wipe the pip cache. Packages download and build again on next install.",
+            cleanup=DeletePaths(*PIP_CACHE_GLOBS),
         ),
     ),
 )

@@ -11,6 +11,7 @@ from nclutils.sh import (
     run_interactive,
 )
 
+from purger.plugin import RunCommand
 from purger.reports import ActionReport, Status
 from purger.safety import UnsafePathError, delete_path
 
@@ -57,17 +58,15 @@ class _PathDeletionError(Exception):
     """A resolved path could not be deleted; the message names the path."""
 
 
-def _run_command_action(
-    command: tuple[str, ...], *, needs_sudo: bool, verbose: bool, interactive: bool
-) -> None:
+def _run_command_action(command: RunCommand, *, verbose: bool, interactive: bool) -> None:
     """Run the tool's own cleanup command."""
-    if needs_sudo and interactive:
-        run_interactive(list(command), sudo=True, check=True)
-    elif needs_sudo:
+    if command.with_sudo and interactive:
+        run_interactive(list(command.argv), sudo=True, check=True)
+    elif command.with_sudo:
         # `-n` makes sudo fail instead of waiting for a password no one can type.
-        run_command(["sudo", "-n", *command], stream=False)
+        run_command(["sudo", "-n", *command.argv], stream=False)
     else:
-        run_command(list(command), stream=verbose)
+        run_command(list(command.argv), stream=verbose)
 
 
 def _delete_paths(report: ActionReport, *, home: Path) -> None:
@@ -109,14 +108,9 @@ def run_action(report: ActionReport, *, home: Path, verbose: bool, interactive: 
             is captured and sudo must not prompt.
     """
     try:
-        command = report.action.command
-        if command is not None:
-            _run_command_action(
-                command,
-                needs_sudo=report.action.needs_sudo,
-                verbose=verbose,
-                interactive=interactive,
-            )
+        cleanup = report.action.cleanup
+        if isinstance(cleanup, RunCommand):
+            _run_command_action(cleanup, verbose=verbose, interactive=interactive)
         else:
             _delete_paths(report, home=home)
     except (ShellCommandError, UnicodeDecodeError, _PathDeletionError, OSError) as exc:
@@ -126,6 +120,26 @@ def run_action(report: ActionReport, *, home: Path, verbose: bool, interactive: 
     else:
         report.status = Status.DONE
         report.error = None
+
+
+def probe_output(argv: Sequence[str], *, timeout: float) -> str | None:
+    """Run a probe command and return what it printed, for a check that reads the answer.
+
+    A command that cannot run and one that exits non-zero both give no answer.
+
+    Args:
+        argv: The command and its arguments.
+        timeout: Seconds to wait before giving up.
+
+    Returns:
+        str | None: The command's stdout, or None when it could not run or exited non-zero.
+    """
+    try:
+        result = run_command(list(argv), check=False, timeout=timeout)
+    except ShellCommandError as exc:
+        logger.debug("probe %s failed: %s", argv[0], exc)
+        return None
+    return result.stdout if result.ok else None
 
 
 def command_succeeds(argv: Sequence[str], *, timeout: float) -> bool:
@@ -140,11 +154,7 @@ def command_succeeds(argv: Sequence[str], *, timeout: float) -> bool:
     Returns:
         bool: True when the command ran and exited zero.
     """
-    try:
-        return run_command(list(argv), check=False, timeout=timeout).ok
-    except ShellCommandError as exc:
-        logger.debug("probe %s failed: %s", argv[0], exc)
-        return False
+    return probe_output(argv, timeout=timeout) is not None
 
 
 def sudo_ready() -> bool:

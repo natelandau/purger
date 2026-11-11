@@ -2,12 +2,12 @@
 
 import json
 
-from purger.plugin import Action, Plugin, Tier
+from purger.plugin import Action, Plugin, RiskLevel, RunCommand, SizeReportedByCommand
 
-_DRY_RUN = ("conda", "clean", "--all", "--dry-run", "--json")
+CONDA_CLEAN_DRY_RUN_COMMAND = ("conda", "clean", "--all", "--dry-run", "--json")
 
 
-def _reclaimable_bytes(output: str) -> int:
+def reclaimable_bytes(output: str) -> int:
     """Sum the tarball and unused package sizes a `conda clean` dry run reports.
 
     The index cache, temp files, and logs carry no size in the report and are small,
@@ -26,20 +26,18 @@ def _reclaimable_bytes(output: str) -> int:
 PLUGIN = Plugin(
     name="conda",
     description="conda package tarballs, unused packages, and index cache",
-    requires="conda",
-    size_cmd=_DRY_RUN,
-    parse_size=_reclaimable_bytes,
+    requires_on_path="conda",
+    total_size=SizeReportedByCommand(CONDA_CLEAN_DRY_RUN_COMMAND, read_size=reclaimable_bytes),
     actions=(
         Action(
             name="clean",
-            tier=Tier.SAFE,
-            help=(
+            risk_level=RiskLevel.SAFE,
+            description=(
                 "Remove downloaded tarballs, packages no environment links to, the index "
                 "cache, and logs. Installs download them again."
             ),
-            command=("conda", "clean", "--all", "--yes"),
-            size_cmd=_DRY_RUN,
-            parse_size=_reclaimable_bytes,
+            cleanup=RunCommand("conda", "clean", "--all", "--yes"),
+            size=SizeReportedByCommand(CONDA_CLEAN_DRY_RUN_COMMAND, read_size=reclaimable_bytes),
         ),
     ),
 )

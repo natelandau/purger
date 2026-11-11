@@ -2,12 +2,18 @@
 
 import sys
 
-from purger.plugin import Action, Plugin, Tier
-from purger.plugins._shared import env_dir
+from purger.plugin import (
+    Action,
+    DeletePaths,
+    OperatingSystem,
+    Plugin,
+    RiskLevel,
+    directory_from_environment,
+)
 from purger.safety import invoking_home
 
 
-def _trash_paths(platform: str) -> tuple[str, ...]:
+def trash_globs(platform: str) -> tuple[str, ...]:
     """List what emptying the home Trash removes on a platform.
 
     On Linux the freedesktop Trash keeps its `files` and `info` folders, so only
@@ -21,11 +27,11 @@ def _trash_paths(platform: str) -> tuple[str, ...]:
     """
     if platform == "darwin":
         return ("~/.Trash/*",)
-    trash = f"{env_dir('XDG_DATA_HOME', '~/.local/share')}/Trash"
+    trash = f"{directory_from_environment('XDG_DATA_HOME', default='~/.local/share')}/Trash"
     return (f"{trash}/files/*", f"{trash}/info/*", f"{trash}/directorysizes")
 
 
-def _is_available() -> bool:
+def trash_is_readable() -> bool:
     """Report whether the macOS Trash can be listed, which needs Full Disk Access.
 
     Without this check, an unreadable Trash would measure as empty.
@@ -42,26 +48,26 @@ def _is_available() -> bool:
     return True
 
 
-_ON_MACOS = sys.platform == "darwin"
+ON_MACOS = sys.platform == "darwin"
 
 PLUGIN = Plugin(
     name="trash",
     description=(
         "macOS Trash in your home folder (the terminal needs Full Disk Access)"
-        if _ON_MACOS
+        if ON_MACOS
         else "Trash in your home folder"
     ),
-    platforms=frozenset({"darwin", "linux"}),
-    is_available=_is_available if _ON_MACOS else None,
+    operating_systems=(OperatingSystem.MACOS, OperatingSystem.LINUX),
+    skip_unless=trash_is_readable if ON_MACOS else None,
     actions=(
         Action(
             name="empty",
-            tier=Tier.CAUTION,
-            help=(
+            risk_level=RiskLevel.CAUTION,
+            description=(
                 "Remove everything in the Trash in your home folder. "
                 "Removed items cannot be recovered."
             ),
-            paths=_trash_paths(sys.platform),
+            cleanup=DeletePaths(*trash_globs(sys.platform)),
         ),
     ),
 )

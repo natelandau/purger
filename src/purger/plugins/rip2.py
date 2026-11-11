@@ -2,17 +2,22 @@
 
 from nclutils.sh import run_command
 
-from purger.plugin import Action, Plugin, Tier
-from purger.sizing import printed_dir_usage
+from purger.plugin import (
+    Action,
+    Plugin,
+    RiskLevel,
+    RunCommand,
+    SizeOfDirectoryPrintedBy,
+)
 
-_GRAVEYARD_CMD = ("rip", "graveyard")
+RIP_GRAVEYARD_COMMAND = ("rip", "graveyard")
 
 # Only rip2 has the `graveyard` subcommand. The original rip installs the same
 # binary and would bury a file named `graveyard` instead of printing a path.
 _RIP2_MARKER = "Print the graveyard path"
 
 
-def _is_available() -> bool:
+def rip_is_rip2() -> bool:
     """Report whether `rip` on PATH is rip2, so its subcommands mean what this plugin expects.
 
     Returns:
@@ -25,21 +30,19 @@ def _is_available() -> bool:
 PLUGIN = Plugin(
     name="rip2",
     description="rip2 graveyard of deleted files",
-    requires="rip",
-    is_available=_is_available,
-    size_cmd=_GRAVEYARD_CMD,
-    parse_size=printed_dir_usage,
+    requires_on_path="rip",
+    skip_unless=rip_is_rip2,
+    total_size=SizeOfDirectoryPrintedBy(RIP_GRAVEYARD_COMMAND),
     actions=(
         Action(
             name="decompose",
-            tier=Tier.CAUTION,
-            help=(
+            risk_level=RiskLevel.CAUTION,
+            description=(
                 "Remove everything in the rip2 graveyard. "
                 "Buried files can no longer be restored with `rip -u`."
             ),
-            command=("rip", "--decompose", "--force"),
-            size_cmd=_GRAVEYARD_CMD,
-            parse_size=printed_dir_usage,
+            cleanup=RunCommand("rip", "--decompose", "--force"),
+            size=SizeOfDirectoryPrintedBy(RIP_GRAVEYARD_COMMAND),
         ),
     ),
 )
