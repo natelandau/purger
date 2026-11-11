@@ -1,3 +1,12 @@
+## v0.3.0 (2026-11-11)
+
+### Feat
+
+- **plugins**: add a projects plugin and a config file (#11)
+- **plugins**: remove the Ansible plugin
+- **plugins**: skip a plugin while its tool is running (#10)
+- **plugins**: add a Poetry cache and virtualenvs plugin (#9)
+
 ## v0.2.0 (2026-11-10)
 
 ### Feat
