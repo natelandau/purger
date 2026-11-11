@@ -6,6 +6,8 @@ import pkgutil
 import sys
 import threading
 from collections.abc import Callable, Sequence
+from collections.abc import Set as AbstractSet
+from dataclasses import dataclass
 from functools import cache
 from types import ModuleType
 
@@ -14,7 +16,7 @@ from nclutils.sh import which
 
 from purger import plugins as _builtin_plugins
 from purger.plugin import Plugin
-from purger.reports import SkipReason
+from purger.reports import SkippedPlugin, SkipReason
 
 logger = logging.getLogger(__name__)
 
@@ -143,19 +145,22 @@ def skip_reason(
 ) -> SkipReason | None:
     """Return why a plugin does not apply to this machine, or None if it does.
 
-    Checks run cheapest first: platform, required binary, the plugin's own
+    Checks run cheapest first: platform, required binary, the plugin's
     availability hook, then a scan for a running copy of its tool.
 
     Args:
         plugin: Plugin to check.
-        check_available: Run the availability hook and the process scan. Disable to avoid their cost.
+        check_available: Run the availability hook and the process scan.
+            Disable to avoid their cost.
         processes: A process table shared across plugins. Defaults to a fresh one.
     """
     if sys.platform not in plugin.platforms:
         return SkipReason.PLATFORM
     if plugin.requires is not None and which(plugin.requires) is None:
         return SkipReason.MISSING_BINARY
-    if check_available and (not _available(plugin) or is_busy(plugin, processes=processes)):
+    if not check_available:
+        return None
+    if not _available(plugin) or is_busy(plugin, processes=processes):
         return SkipReason.UNAVAILABLE
     return None
 
@@ -186,24 +191,50 @@ def _spawned_by(proc: psutil.Process, *, pid: int) -> bool:
         return not proc.is_running()
 
 
-def select_plugins(registry: dict[str, Plugin], names: Sequence[str]) -> list[Plugin]:
-    """Narrow a registry to the requested plugin names.
+@dataclass(frozen=True)
+class Selection:
+    """The plugins a run measures, and the plugins the skip setting turned off."""
+
+    plugins: list[Plugin]
+    disabled: list[SkippedPlugin]
+
+
+def select_plugins(
+    registry: dict[str, Plugin],
+    names: Sequence[str],
+    *,
+    skip: AbstractSet[str] = frozenset(),
+) -> Selection:
+    """Narrow a registry to the requested plugin names and drop the disabled ones.
+
+    The skip setting applies only to a run that names no plugins, so naming a
+    plugin runs it regardless. Disabled plugins never reach `skip_reason`, so
+    none of their hooks run.
 
     Args:
         registry: All known plugins keyed by name.
         names: Requested names. Empty selects every plugin.
+        skip: Plugin names the skip setting turns off.
 
     Returns:
-        Plugins in the order requested, without repeats.
+        Selection: Plugins in the order requested, without repeats, and the
+            disabled plugins in registry order.
 
     Raises:
         UnknownPluginError: If any name is not in the registry.
     """
     if not names:
-        return list(registry.values())
+        return Selection(
+            plugins=[plugin for name, plugin in registry.items() if name not in skip],
+            disabled=[
+                SkippedPlugin(name=name, reason=SkipReason.DISABLED)
+                for name in registry
+                if name in skip
+            ],
+        )
     requested = list(dict.fromkeys(names))
     unknown = [name for name in requested if name not in registry]
     if unknown:
         msg = f"unknown plugin(s): {', '.join(unknown)}. valid plugins: {', '.join(registry)}"
         raise UnknownPluginError(msg)
-    return [registry[name] for name in requested]
+    return Selection(plugins=[registry[name] for name in requested], disabled=[])

@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from pytest_mock import MockerFixture
 
+from purger.config import Config
 from purger.plugins import rip2
 from purger.sizing import disk_usage, measure_plugin
 from tests.conftest import make_completed
@@ -49,7 +50,9 @@ def test_rip2_measures_printed_graveyard(tmp_path: Path, mocker: MockerFixture) 
     )
 
     # When
-    report = measure_plugin(rip2.PLUGIN, include_dangerous=False)
+    report = measure_plugin(
+        rip2.PLUGIN, include_dangerous=False, settings=Config().settings_for(rip2.PLUGIN)
+    )
 
     # Then
     assert report.footprint_bytes == disk_usage([tmp_path])

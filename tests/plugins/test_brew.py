@@ -6,6 +6,7 @@ import pytest
 from nclutils.sh import ShellCommandNotFoundError
 from pytest_mock import MockerFixture
 
+from purger.config import Config
 from purger.plugins import brew
 from purger.plugins.brew import _parse_dry_run
 from purger.sizing import disk_usage, measure_plugin
@@ -113,7 +114,9 @@ def test_brew_footprint_counts_versions_both_actions_remove_once(
     )
 
     # When
-    report = measure_plugin(brew.PLUGIN, include_dangerous=False)
+    report = measure_plugin(
+        brew.PLUGIN, include_dangerous=False, settings=Config().settings_for(brew.PLUGIN)
+    )
 
     # Then the footprint is cleanup's total plus the formula folder, less the old version
     rack = old.parent

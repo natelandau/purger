@@ -8,8 +8,10 @@ docstring with one line that names the tool.
 """
 
 from functools import partial
+from pathlib import Path
 
-from purger.plugin import Action, Plugin, Tier
+from purger.config import PluginSettings
+from purger.plugin import Action, Plugin, Setting, SettingValue, Tier
 from purger.plugins._shared import program_matcher
 from purger.runner import command_succeeds
 from purger.sizing import printed_dir_usage
@@ -24,6 +26,35 @@ def _is_available() -> bool:
         bool: True when the tool is usable.
     """
     return command_succeeds(["example-tool", "status"], timeout=10)
+
+
+def _prepare(settings: PluginSettings) -> dict[str, tuple[Path, ...]] | None:
+    """Scan once so every `prepared` action shares the result.
+
+    Args:
+        settings: The plugin's settings for this run.
+
+    Returns:
+        dict[str, tuple[Path, ...]] | None: The paths of each prepared action
+            by action name, or None while a required setting is missing.
+    """
+    if not settings.str_list("search_paths"):
+        return None
+    return {}
+
+
+def _check_positive(value: SettingValue) -> None:
+    """Reject a setting value that is not a positive number.
+
+    Args:
+        value: The configured value.
+
+    Raises:
+        ValueError: If the value is not above zero.
+    """
+    if not isinstance(value, int) or value < 1:
+        msg = "must be at least 1"
+        raise ValueError(msg)
 
 
 def _explain_failure(stderr: str) -> str | None:
@@ -67,6 +98,36 @@ PLUGIN = Plugin(
     # Turns the `size_cmd` output into bytes. When the tool prints its cache
     # directory, `printed_dir_usage` measures the directory it really uses.
     parse_size=printed_dir_usage,
+    # Options users set in `[plugins.example-tool]` of the config file, or with
+    # `PURGER_EXAMPLE_TOOL__<NAME>`. Kinds: "str", "int", "bool", "str_list".
+    # The default must match the kind. `check` may raise ValueError to reject a
+    # value. Hooks that take settings read them from the `PluginSettings`
+    # they receive, such as `settings.integer("name")`.
+    settings=(
+        Setting(
+            # Snake_case and unique within the plugin.
+            name="max_age_days",
+            kind="int",
+            default=30,
+            help="Only remove entries older than this many days.",
+            check=_check_positive,
+        ),
+        Setting(
+            name="search_paths",
+            kind="str_list",
+            default=(),
+            help="Folders to search. The plugin is skipped until one is set.",
+        ),
+    ),
+    # Receives the plugin's settings for the run and returns the literal paths
+    # of each `prepared` action, keyed by action name. Use it to do one scan
+    # that several actions share. It runs once per run, after the availability
+    # and busy checks pass. Return None while a required setting is missing,
+    # such as search paths, and the plugin is skipped as `not_configured`.
+    # Re-measuring after a cleanup does not run it again but re-measures the
+    # paths it returned. A hook that raises is logged and the plugin shows
+    # with no prepared paths.
+    prepare=_prepare,
     # Alternatives to `size_cmd`:
     # paths=("~/.cache/example-tool",),  # Globs, measured on disk.
     # size=_measure,  # Returns bytes, or None when the size is unknown.
@@ -100,6 +161,9 @@ PLUGIN = Plugin(
             # on disk, pass a function that returns them; it runs each time the
             # action is measured. Never scan the disk at import.
             paths=("~/.local/state/example-tool/logs/*",),
+            # Instead of `paths`, set prepared=True to take this action's paths
+            # from what the plugin's `prepare` hook returns under its name.
+            # Those paths are literal, not globs.
             # The plugin's footprint does not cover this data, so this action's
             # size is added to it.
             outside_footprint=True,

@@ -6,6 +6,7 @@ import pytest
 from nclutils.sh import ShellCommandNotFoundError
 from pytest_mock import MockerFixture
 
+from purger.config import Config
 from purger.plugins import docker
 from purger.sizing import measure_plugin
 from tests.conftest import make_completed
@@ -43,7 +44,9 @@ def test_docker_measurement_runs_system_df_once(mocker: MockerFixture) -> None:
     )
 
     # When
-    report = measure_plugin(docker.PLUGIN, include_dangerous=True)
+    report = measure_plugin(
+        docker.PLUGIN, include_dangerous=True, settings=Config().settings_for(docker.PLUGIN)
+    )
 
     # Then the command ran once and each action reads its own row types
     run.assert_called_once()
