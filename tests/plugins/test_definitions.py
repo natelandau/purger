@@ -1,4 +1,4 @@
-"""Tests that validate every built-in plugin definition."""
+"""Tests for rules that every built-in plugin definition must follow."""
 
 import importlib
 import pkgutil
@@ -217,18 +217,6 @@ def test_plugin_action_tier_and_command(
     assert action.command == command
 
 
-def test_docker_volumes_count_outside_footprint() -> None:
-    """Verify Docker volumes are added to the footprint, since docker df reclaimable excludes them."""
-    # Given
-    plugin = discover_plugins()["docker"]
-
-    # When
-    flags = {a.name: a.outside_footprint for a in plugin.actions}
-
-    # Then
-    assert flags == {"builder": False, "system": False, "volumes": True}
-
-
 @pytest.mark.parametrize(
     ("plugin_name", "action_name"), [("brew", "autoremove"), ("macports", "reclaim")]
 )
@@ -242,18 +230,6 @@ def test_uninstalling_actions_need_confirmation(plugin_name: str, action_name: s
 
     # Then
     assert action.tier is not Tier.SAFE
-
-
-def test_mise_prune_counts_outside_footprint() -> None:
-    """Verify pruned tool versions add to the footprint, since the mise cache excludes them."""
-    # Given
-    plugin = discover_plugins()["mise"]
-
-    # When
-    flags = {a.name: a.outside_footprint for a in plugin.actions}
-
-    # Then
-    assert flags == {"cache-prune": False, "prune": True, "cache-clear": False}
 
 
 @pytest.mark.parametrize("plugin", _PLUGINS, ids=lambda p: p.name)

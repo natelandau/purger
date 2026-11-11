@@ -10,6 +10,7 @@ from types import ModuleType
 from typing import Any
 
 import pytest
+from nclutils.sh import CompletedCommand
 from rich.table import Table
 from rich.text import Text
 
@@ -106,3 +107,10 @@ def make_action_fixture() -> Callable[..., Action]:
 def make_plugin_fixture() -> Callable[..., Plugin]:
     """Provide the make_plugin factory as a fixture."""
     return make_plugin
+
+
+def make_completed(*, returncode: int = 0, stdout: str = "") -> CompletedCommand:
+    """Build a finished tool command, for tests that mock `run_command`."""
+    return CompletedCommand(
+        argv=("tool",), returncode=returncode, stdout=stdout, stderr="", duration=0.0, cwd=None
+    )

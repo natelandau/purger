@@ -67,7 +67,9 @@ uv run purger info
 uv run purger clean --dry-run
 ```
 
-The tests live in `tests/unit/`. Each test file matches a module in `src/purger/`.
+The tests for the core modules live in `tests/unit/`. Each test file matches a module in `src/purger/`.
+
+The tests for the plugins live in `tests/plugins/`. Each plugin has its own test file, named after its module: the tests for `src/purger/plugins/docker.py` are in `tests/plugins/test_docker.py`. Do not put tests for two plugins in one file. The tests that apply a rule to every plugin are in `tests/plugins/test_definitions.py`.
 
 ## Add a plugin
 
@@ -81,8 +83,9 @@ To add a plugin, do these steps:
 2. Replace the module docstring with one line that names the tool.
 3. Change the plugin fields and the actions to match the tool. Delete each field and action that the tool does not need.
 4. If the plugin has two or more command actions, give the plugin its own `size`, `size_cmd`, or `paths`. Their sizes can overlap, so purger cannot add them together. The exception is a plugin where each command action measures exactly what it frees, such as `go`.
-5. In `tests/unit/test_plugin_definitions.py`, add the plugin name to `test_discover_plugins_finds_builtin_set` and add each action to `_EXPECTED_ACTIONS`.
-6. Run `uv run purger info` and `uv run purger --help` to make sure that the plugin appears.
+5. In `tests/plugins/test_definitions.py`, add the plugin name to `test_discover_plugins_finds_builtin_set` and add each action to `_EXPECTED_ACTIONS`.
+6. Put the plugin's own tests in a new file, `tests/plugins/test_<module>.py`. Mock each tool command. A test that runs a real tool command fails.
+7. Run `uv run purger info` and `uv run purger --help` to make sure that the plugin appears.
 
 A plugin must not delete anything that the user cannot rebuild, unless the action has the `dangerous` tier. A path action can delete only below your home directory. purger refuses every other path.
 

@@ -17,7 +17,9 @@
 
 ## Plugins
 
-Start a new plugin from `src/purger/plugins/_template.py`, which documents every `Plugin` and `Action` field. A new field on either class must be documented in the template, and `tests/unit/test_plugin_template.py` fails until it is. Discovery skips modules whose names start with `_`.
+Start a new plugin from `src/purger/plugins/_template.py`, which documents every `Plugin` and `Action` field. A new field on either class must be documented in the template, and `tests/plugins/test_template.py` fails until it is. Discovery skips modules whose names start with `_`.
+
+Each plugin gets its own test file, `tests/plugins/test_<module>.py`. Never add a plugin's tests to another plugin's file or to a shared file. Only rules that every plugin must follow go in `tests/plugins/test_definitions.py`. Core module tests stay in `tests/unit/`.
 
 ## Public contracts
 
