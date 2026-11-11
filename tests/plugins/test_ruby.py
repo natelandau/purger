@@ -36,7 +36,7 @@ def _mock_gem(mocker: MockerFixture, gem_dir: Path, dry_run: str = _DRY_RUN) -> 
     """Answer the gem queries the plugin and the sizing code run."""
     outputs = {
         ruby._GEM_DIR_CMD: f"{gem_dir}\n",
-        ("gem", "cleanup", "--dryrun"): dry_run,
+        (*ruby._CLEANUP_CMD, "-n"): dry_run,
     }
     for target in ("purger.plugins.ruby.run_command", "purger.sizing.run_command"):
         mocker.patch(
@@ -46,18 +46,10 @@ def _mock_gem(mocker: MockerFixture, gem_dir: Path, dry_run: str = _DRY_RUN) -> 
         )
 
 
-def test_ruby_parse_gem_dir_reads_one_absolute_path() -> None:
-    """Verify the GEM_HOME line is read with surrounding blank lines ignored."""
-    # When / Then
-    assert ruby._parse_gem_dir("\n/home/me/.gem/ruby/3.3.0\n") == Path("/home/me/.gem/ruby/3.3.0")
-
-
-@pytest.mark.parametrize("output", ["", "gems\n", "/a\n/b\n"])
-def test_ruby_parse_gem_dir_rejects_unusable_output(output: str) -> None:
-    """Verify an empty, relative, or multi-line answer is refused rather than guessed at."""
-    # When / Then
-    with pytest.raises(ValueError, match="expected one absolute directory"):
-        ruby._parse_gem_dir(output)
+@pytest.fixture(autouse=True)
+def _fresh_gem_dir() -> None:
+    """Forget the GEM_HOME a previous test's mocked `gem` reported."""
+    ruby._gem_dir.cache_clear()
 
 
 def test_ruby_old_version_names_read_the_dry_run() -> None:
@@ -81,7 +73,7 @@ def test_ruby_available_when_user_owns_gem_dir(tmp_path: Path, mocker: MockerFix
     """Verify a GEM_HOME the user owns, as a version manager creates, is cleaned."""
     # Given
     _mock_gem(mocker, tmp_path)
-    mocker.patch("purger.plugins.ruby.Path.home", return_value=tmp_path)
+    mocker.patch("purger.plugins.ruby.invoking_home", return_value=tmp_path)
 
     # When / Then
     assert ruby._is_available() is True
@@ -93,7 +85,7 @@ def test_ruby_unavailable_when_gem_dir_owned_by_another_user(
     """Verify a system Ruby's root-owned GEM_HOME is skipped, since cleaning it needs sudo."""
     # Given a home directory whose owner differs from the GEM_HOME owner
     _mock_gem(mocker, Path("/"))
-    mocker.patch("purger.plugins.ruby.Path.home", return_value=tmp_path)
+    mocker.patch("purger.plugins.ruby.invoking_home", return_value=tmp_path)
 
     # When / Then
     assert ruby._is_available() is False
@@ -180,3 +172,16 @@ def test_ruby_busy_while_gem_or_bundler_runs(argv: list[str], *, busy: bool) -> 
     # When / Then
     assert ruby.PLUGIN.busy_process is not None
     assert ruby.PLUGIN.busy_process(argv) is busy
+
+
+def test_ruby_gem_dir_resolves_symlinks(tmp_path: Path, mocker: MockerFixture) -> None:
+    """Verify a symlinked GEM_HOME is measured at its real path, which deletion accepts."""
+    # Given a GEM_HOME reached through a symlink
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    _mock_gem(mocker, link)
+
+    # When / Then
+    assert ruby._gem_dir() == real
