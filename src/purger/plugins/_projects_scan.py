@@ -421,8 +421,7 @@ def _find_project(
     None when an ancestor cannot be probed, because the candidate might belong to a
     repository.
     """
-    relative = candidate.relative_to(root).parts
-    local = root / relative[0] if len(relative) > 1 else root
+    local = _root_child(candidate, root)
     for ancestor in candidate.parents:
         has_git = context.probe_repo(ancestor)
         if has_git is None:
@@ -430,6 +429,33 @@ def _find_project(
         if has_git:
             return ancestor, (local if ancestor in root.parents else ancestor)
     return None, local
+
+
+def project_folder(path: Path, root: Path) -> Path:
+    """Return the project a found folder belongs to, so detail rows can group by project.
+
+    Mirrors `_find_project`: a repository at or below the root wins, and
+    otherwise the root's child holding the path, or the root itself.
+
+    Args:
+        path: A folder the scan found, below `root`.
+        root: The scan root that holds it.
+
+    Returns:
+        Path: The project folder.
+    """
+    for ancestor in path.parents:
+        if ancestor != root and root not in ancestor.parents:
+            break
+        if (ancestor / ".git").exists():
+            return ancestor
+    return _root_child(path, root)
+
+
+def _root_child(path: Path, root: Path) -> Path:
+    """Return the root's child that holds the path, or the root for a direct child."""
+    relative = path.relative_to(root).parts
+    return root / relative[0] if len(relative) > 1 else root
 
 
 def _mtime(path: Path) -> float:

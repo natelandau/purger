@@ -1,14 +1,16 @@
 """Plugin for tool caches and build leftovers inside the user's project folders."""
 
 import time
+from collections import Counter
 from functools import partial
 from pathlib import Path
 
 from nclutils import pp
 
 from purger.config import PluginSettings
-from purger.plugin import Action, Plugin, Setting, SettingValue, Tier
-from purger.plugins._projects_scan import Category, ScanOptions, scan
+from purger.details import tilde
+from purger.plugin import Action, Detail, PathSizes, Plugin, Setting, SettingValue, Tier
+from purger.plugins._projects_scan import Category, ScanOptions, project_folder, scan
 from purger.safety import invoking_home, resolve_home_folder
 
 
@@ -97,7 +99,7 @@ def _expand(raw: str, home: Path) -> Path:
     return Path(raw)
 
 
-def _roots(entries: tuple[str, ...], home: Path) -> tuple[Path, ...]:
+def _roots(entries: tuple[str, ...], home: Path, *, warn: bool = True) -> tuple[Path, ...]:
     """Return the configured project roots that are safe to scan.
 
     A root must be an absolute folder strictly inside home, on home's device.
@@ -107,6 +109,7 @@ def _roots(entries: tuple[str, ...], home: Path) -> tuple[Path, ...]:
     Args:
         entries: The configured `paths` setting.
         home: The invoking user's home, resolved.
+        warn: Warn about each bad root. Off when the scan already warned.
 
     Returns:
         tuple[Path, ...]: Resolved, non-nested roots.
@@ -115,7 +118,8 @@ def _roots(entries: tuple[str, ...], home: Path) -> tuple[Path, ...]:
     for raw in dict.fromkeys(entries):
         root = resolve_home_folder(_expand(raw=raw, home=home), home_resolved=home)
         if isinstance(root, str):
-            pp.warning(f"Ignoring projects path {raw}: {root}")
+            if warn:
+                pp.warning(f"Ignoring projects path {raw}: {root}")
             continue
         if root not in kept:
             kept.append(root)
@@ -153,6 +157,48 @@ def _prepare(settings: PluginSettings) -> dict[str, tuple[Path, ...]] | None:
     found = scan(options)
     # Each category's value is the name of the action that offers it.
     return {category.value: tuple(found.get(category, ())) for category in Category}
+
+
+def _items(paths: list[Path]) -> tuple[str, ...]:
+    """Name what a project holds, counting folders that repeat, such as `18 __pycache__`."""
+    counts = Counter(path.name for path in paths)
+    return tuple(name if n == 1 else f"{n} {name}" for name, n in sorted(counts.items()))
+
+
+def _details(sizes: PathSizes, settings: PluginSettings) -> list[Detail]:
+    """Group the found folders by project, so a person can see which projects a clean touches.
+
+    With one root, labels are relative to it. With several, labels are home
+    paths, so same-named projects under different roots stay apart.
+
+    Args:
+        sizes: Each found folder's measured size.
+        settings: The plugin's settings for this run.
+
+    Returns:
+        list[Detail]: One row per project.
+    """
+    roots = _roots(settings.str_list("paths"), home=invoking_home().resolve(), warn=False)
+    groups: dict[Path, list[Path]] = {}
+    for path in sizes:
+        root = max((r for r in roots if r in path.parents), key=lambda r: len(r.parts))
+        groups.setdefault(project_folder(path, root), []).append(path)
+    rows: list[Detail] = []
+    for project, paths in groups.items():
+        if len(roots) > 1:
+            label = tilde(project)
+        else:
+            label = str(project.relative_to(roots[0])) if project != roots[0] else project.name
+        rows.append(
+            Detail(
+                label=label,
+                size_bytes=sum(sizes[path] for path in paths),
+                items=_items(paths),
+                paths=tuple(sorted(paths)),
+                key=str(project),
+            )
+        )
+    return rows
 
 
 PLUGIN = Plugin(
@@ -201,24 +247,28 @@ PLUGIN = Plugin(
             tier=Tier.SAFE,
             help="Remove tool caches in your projects, such as .mypy_cache and __pycache__. Tools rebuild them on their next run.",
             prepared=True,
+            details=_details,
         ),
         Action(
             name="dependencies",
             tier=Tier.CAUTION,
             help="Remove installed dependencies, such as node_modules and .venv, from projects untouched for a while. Reinstall them before you work on a project again.",
             prepared=True,
+            details=_details,
         ),
         Action(
             name="builds",
             tier=Tier.CAUTION,
             help="Remove build output, such as target and dist, from projects untouched for a while. The next build starts from scratch.",
             prepared=True,
+            details=_details,
         ),
         Action(
             name="custom",
             tier=Tier.CAUTION,
             help="Remove the folders named in the include setting. purger cannot tell how costly they are to rebuild.",
             prepared=True,
+            details=_details,
         ),
     ),
 )
