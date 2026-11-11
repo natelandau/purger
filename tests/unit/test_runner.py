@@ -157,6 +157,33 @@ def test_run_action_path_os_error_fails_action(mocker: MockerFixture, tmp_path: 
     assert "denied" in report.error
 
 
+def test_run_action_continues_past_filesystem_errors(tmp_path: Path) -> None:
+    """Verify one undeletable path fails the action without stopping the others."""
+    # Given
+    home = tmp_path / "Users" / "me"
+    caches = home / "repos" / "proj"
+    first, stuck, last = (caches / name for name in ("a", "b", "c"))
+    for folder in (first, stuck, last):
+        (folder / "f.pyc").parent.mkdir(parents=True)
+        (folder / "f.pyc").write_text("x")
+    stuck.chmod(0o500)
+    report = _report([first, stuck, last], command=None, paths=("~/repos/proj/*",))
+
+    # When
+    try:
+        run_action(report, home=home, verbose=False, interactive=True)
+    finally:
+        stuck.chmod(0o700)
+
+    # Then
+    assert report.status == Status.FAILED
+    assert report.error is not None
+    assert str(stuck) in report.error
+    assert not first.exists()
+    assert not last.exists()
+    assert stuck.exists()
+
+
 def test_sudo_ready_true_when_credentials_cached(mocker: MockerFixture) -> None:
     """Verify sudo_ready is True when the non-interactive sudo probe succeeds."""
     # Given

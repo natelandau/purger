@@ -71,13 +71,27 @@ def _run_command_action(
 
 
 def _delete_paths(report: ActionReport, *, home: Path) -> None:
-    """Delete resolved paths, stopping at the first failure."""
+    """Delete resolved paths, continuing past filesystem errors.
+
+    A guard violation stops at once, since it means the path list itself is
+    suspect. A filesystem error, such as one unremovable file, fails only its
+    own path, so the rest of the action's paths are still removed.
+
+    Raises:
+        _PathDeletionError: If any path could not be deleted. The message names
+            every failed path.
+    """
+    failures: list[str] = []
     for path in report.resolved_paths:
         try:
             delete_path(path=path, home=home)
-        except (UnsafePathError, OSError) as exc:
-            msg = f"{path}: {exc}"
-            raise _PathDeletionError(msg) from exc
+        except UnsafePathError as exc:
+            failures.append(f"{path}: {exc}")
+            break
+        except OSError as exc:
+            failures.append(f"{path}: {exc}")
+    if failures:
+        raise _PathDeletionError("\n".join(failures))
 
 
 def run_action(report: ActionReport, *, home: Path, verbose: bool, interactive: bool) -> None:
