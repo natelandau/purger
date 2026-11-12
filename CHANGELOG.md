@@ -1,3 +1,14 @@
+## v0.4.0 (2026-11-12)
+
+### Feat
+
+- **cli**: show what each cache holds with -v (#12)
+- **plugins**: add a Ruby plugin for old gem versions
+
+### Refactor
+
+- **plugins**: describe plugins with plainly named fields (#13)
+
 ## v0.3.0 (2026-11-11)
 
 ### Feat
