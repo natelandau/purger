@@ -1,3 +1,9 @@
+## v0.5.0 (2026-11-12)
+
+### Feat
+
+- **cli**: show measuring rows only for plugins that can run (#15)
+
 ## v0.4.1 (2026-11-12)
 
 ### Fix
