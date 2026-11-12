@@ -4,10 +4,13 @@ import json
 import sys
 import threading
 from collections.abc import Callable
+from io import StringIO
 from pathlib import Path
 
 import pytest
 from pytest_mock import MockerFixture, MockType
+from rich.console import Console
+from rich.text import Text
 
 from purger import cli
 from purger.cli import ExitCode, app, confirm, main
@@ -360,7 +363,7 @@ def test_clean_dry_run_executes_nothing(
         )
     )
     run_action = mocker.patch("purger.execution.run_action", autospec=True)
-    ask = mocker.patch("purger.cli.choose_one_from_list", autospec=True)
+    ask = mocker.patch("purger.cli.Confirm.ask", autospec=True)
 
     # When
     code = _run("clean", "--dry-run")
@@ -411,7 +414,7 @@ def test_clean_interactive_yes_still_confirms_caution_and_notes_sudo(
         )
     )
     mocker.patch.object(cli.sys.stdin, "isatty", return_value=True)
-    ask = mocker.patch("purger.cli.choose_one_from_list", autospec=True, return_value="no")
+    ask = mocker.patch("purger.cli.Confirm.ask", autospec=True, return_value=False)
     run_action = mocker.patch("purger.execution.run_action", autospec=True, side_effect=_mark_done)
 
     # When
@@ -421,7 +424,7 @@ def test_clean_interactive_yes_still_confirms_caution_and_notes_sudo(
     err = capsys.readouterr().err
     assert code == ExitCode.OK
     assert ask.call_count == 1
-    assert ask.call_args.args[1].startswith("alpha (about ")
+    assert ask.call_args.args[0].plain.startswith("alpha (about ")
     assert [c.args[0].action.name for c in run_action.call_args_list] == ["sudo-safe"]
     assert "alpha/sudo-safe" in err
     assert "sudo" in err
@@ -431,11 +434,11 @@ def test_clean_interrupt_at_prompt_runs_nothing(
     patch_registry: Callable[..., None],
     mocker: MockerFixture,
 ) -> None:
-    """Verify Ctrl-C at a prompt, which the prompt reports as None, exits 130 without running anything."""
+    """Verify Ctrl-C at a prompt exits 130 without running anything."""
     # Given a prompt cancelled with Ctrl-C
     patch_registry(make_plugin(name="alpha"))
     mocker.patch.object(cli.sys.stdin, "isatty", return_value=True)
-    mocker.patch("purger.cli.choose_one_from_list", autospec=True, return_value=None)
+    mocker.patch("purger.cli.Confirm.ask", autospec=True, side_effect=KeyboardInterrupt)
     run_action = mocker.patch("purger.execution.run_action", autospec=True)
 
     # When
@@ -446,24 +449,125 @@ def test_clean_interrupt_at_prompt_runs_nothing(
     run_action.assert_not_called()
 
 
-@pytest.mark.parametrize(("answer", "expected"), [("no", False), ("yes", True)])
-def test_confirm_maps_answers(answer: str, expected: bool, mocker: MockerFixture) -> None:
-    """Verify confirm returns True only for Yes."""
+def _prompt_console(
+    mocker: MockerFixture, *, width: int, typed: str | list[str] | type[BaseException]
+) -> tuple[StringIO, MockType]:
+    """Route confirm through a real terminal rich console of a fixed width that reads `typed`.
+
+    A list feeds one answer per prompt, and an exception type is raised at the prompt.
+    """
+    out = StringIO()
+    console = Console(file=out, width=width, force_terminal=True, color_system=None)
+    mocker.patch("purger.cli.pp.console", return_value=console)
+    if isinstance(typed, str):
+        read = mocker.patch("builtins.input", return_value=typed)
+    else:
+        read = mocker.patch("builtins.input", side_effect=typed)
+    return out, read
+
+
+@pytest.mark.parametrize(("typed", "expected"), [("n", False), ("y", True), ("Y", True)])
+def test_confirm_maps_answers(typed: str, expected: bool, mocker: MockerFixture) -> None:
+    """Verify confirm returns True only when the user answers yes."""
     # Given
-    ask = mocker.patch("purger.cli.choose_one_from_list", autospec=True, return_value=answer)
+    _prompt_console(mocker, width=80, typed=typed)
+
+    # When / Then
+    assert confirm("Proceed?") is expected
+
+
+def test_confirm_has_no_default(mocker: MockerFixture) -> None:
+    """Verify Enter alone never approves, so the question is asked again."""
+    # Given a user who presses Enter, then answers yes
+    _, read = _prompt_console(mocker, width=80, typed=["", "y"])
+
+    # When / Then
+    assert confirm("Proceed?") is True
+    assert read.call_count == 2
+
+
+def test_confirm_prints_blank_line_before_prompt(mocker: MockerFixture) -> None:
+    """Verify each question starts after a blank line so consecutive questions stay apart."""
+    # Given
+    out, _ = _prompt_console(mocker, width=80, typed="y")
 
     # When
-    result = confirm("Proceed?")
+    confirm("First?")
+    confirm("Second?")
 
     # Then
-    assert result is expected
-    assert ask.call_args.args[0] == [("Yes", "yes"), ("No", "no")]
+    assert out.getvalue() == "\nFirst? [y/n]: \nSecond? [y/n]: "
 
 
-def test_confirm_cancelled_prompt_is_interrupt(mocker: MockerFixture) -> None:
-    """Verify a cancelled prompt raises KeyboardInterrupt so Ctrl-C stops the run."""
-    # Given a prompt that reports cancellation as None
-    mocker.patch("purger.cli.choose_one_from_list", autospec=True, return_value=None)
+def test_confirm_asks_on_stderr_when_stdout_is_redirected(mocker: MockerFixture) -> None:
+    """Verify a redirected stdout gets no question, so the user still sees it on the terminal."""
+    # Given stdout redirected to a file and stderr on a terminal
+    stdout, stderr = StringIO(), StringIO()
+    mocker.patch("purger.cli.pp.console", return_value=Console(file=stdout))
+    mocker.patch(
+        "purger.cli.pp.err_console",
+        return_value=Console(file=stderr, force_terminal=True, color_system=None),
+    )
+    mocker.patch("builtins.input", return_value="y")
+
+    # When
+    confirm("Proceed?")
+
+    # Then
+    assert stdout.getvalue() == ""
+    assert stderr.getvalue() == "\nProceed? [y/n]: "
+
+
+def test_confirm_wraps_between_words(mocker: MockerFixture) -> None:
+    """Verify a long question wraps at word boundaries within the console width."""
+    # Given
+    message = (
+        "playwright (about 1.5 GB): Remove each browser build older than the newest one. "
+        "Playwright needs `playwright install` before its next run. Continue?"
+    )
+    out, _ = _prompt_console(mocker, width=40, typed="y")
+
+    # When
+    confirm(message)
+
+    # Then
+    lines = out.getvalue().strip("\n").split("\n")
+    assert len(lines) > 1
+    assert all(len(line) <= 40 for line in lines)
+    assert " ".join(lines).split() == [*message.split(), "[y/n]:"]
+
+
+def test_confirm_shows_brackets_literally(mocker: MockerFixture) -> None:
+    """Verify square brackets in a question are shown as typed, not read as rich markup."""
+    # Given
+    out, _ = _prompt_console(mocker, width=80, typed="y")
+
+    # When
+    confirm("Remove [bold]cache[/bold]?")
+
+    # Then
+    assert "Remove [bold]cache[/bold]? [y/n]:" in out.getvalue()
+
+
+def test_confirm_passes_text_to_prompt(mocker: MockerFixture) -> None:
+    """Verify the question reaches the prompt as rich Text."""
+    # Given
+    ask = mocker.patch("purger.cli.Confirm.ask", autospec=True, return_value=True)
+
+    # When
+    confirm("Proceed?")
+
+    # Then
+    assert ask.call_args.args[0] == Text("Proceed?")
+
+
+@pytest.mark.parametrize("error", [KeyboardInterrupt, EOFError])
+def test_confirm_cancelled_prompt_is_interrupt(
+    error: type[BaseException], mocker: MockerFixture
+) -> None:
+    """Verify Ctrl-C or closed input raises KeyboardInterrupt so the run stops."""
+    # Given
+    _prompt_console(mocker, width=80, typed=error)
 
     # When / Then
     with pytest.raises(KeyboardInterrupt):
@@ -703,7 +807,7 @@ def test_clean_interactive_caution_yes_runs_it(
         )
     )
     mocker.patch.object(cli.sys.stdin, "isatty", return_value=True)
-    mocker.patch("purger.cli.choose_one_from_list", autospec=True, return_value="yes")
+    mocker.patch("purger.cli.Confirm.ask", autospec=True, return_value=True)
     run_action = mocker.patch("purger.execution.run_action", autospec=True, side_effect=_mark_done)
 
     # When
@@ -1114,11 +1218,11 @@ def test_clean_verbose_shows_size_breakdown_before_prompts(
     mocker.patch.object(cli.sys.stdin, "isatty", return_value=True)
     seen: list[str] = []
 
-    def answer(*args: object, **kwargs: object) -> str:
+    def answer(*args: object, **kwargs: object) -> bool:
         seen.append(capsys.readouterr().out)
-        return "no"
+        return False
 
-    mocker.patch("purger.cli.choose_one_from_list", autospec=True, side_effect=answer)
+    mocker.patch("purger.cli.Confirm.ask", autospec=True, side_effect=answer)
 
     # When
     _run("clean", "-v")
@@ -1171,7 +1275,7 @@ def test_clean_verbose_skips_rows_of_actions_with_nothing_to_clean(
 
     _patch_measure(mocker, side_effect=measure)
     mocker.patch.object(cli.sys.stdin, "isatty", return_value=True)
-    mocker.patch("purger.cli.choose_one_from_list", autospec=True, return_value="no")
+    mocker.patch("purger.cli.Confirm.ask", autospec=True, return_value=False)
 
     # When
     _run("clean", "-v")

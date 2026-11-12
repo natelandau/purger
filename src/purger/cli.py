@@ -12,7 +12,8 @@ from typing import Annotated, Any
 
 from cyclopts import App, CycloptsError, Parameter
 from nclutils import pp
-from nclutils.ask import choose_one_from_list
+from rich.prompt import Confirm
+from rich.text import Text
 
 from purger import __version__
 from purger.clean_flow import CleanOptions, plan_clean
@@ -134,22 +135,30 @@ def attach_plugin_catalog() -> None:
 def confirm(message: str) -> bool:
     """Ask a yes/no question so a person approves each risky step.
 
-    The prompt reports Ctrl-C as None, so a cancelled prompt is raised as an
-    interrupt to stop the run rather than read as No.
+    The question has no default, so pressing Enter alone never approves a
+    cleanup. Closing input with Ctrl-D is raised as an interrupt so it stops the
+    run the same way Ctrl-C does.
 
     Args:
         message: The question to show.
 
     Returns:
-        bool: True only when the user chose Yes.
+        bool: True only when the user answered yes.
 
     Raises:
-        KeyboardInterrupt: If the user cancelled the prompt.
+        KeyboardInterrupt: If the user closed input instead of answering.
     """
-    answer = choose_one_from_list([("Yes", "yes"), ("No", "no")], message)
-    if answer is None:
-        raise KeyboardInterrupt
-    return answer == "yes"
+    console = pp.console()
+    # A question on a redirected stdout lands in the file and leaves the user waiting blind.
+    if not console.is_terminal:
+        console = pp.err_console()
+    # Consecutive questions wrap across several lines, so a blank line keeps each one distinct.
+    console.print()
+    try:
+        # Text, not a str, so square brackets in plugin descriptions are never read as markup.
+        return Confirm.ask(Text(message), console=console)
+    except EOFError as exc:
+        raise KeyboardInterrupt from exc
 
 
 def _reason_text(reason: SkipReason) -> str:
