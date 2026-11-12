@@ -50,7 +50,8 @@ run time what it still needs. Sizes that cannot be measured show `?` and are
 left out of the total. `dangerous` actions are left out unless you pass
 `--dangerous`, which can turn a partial purge into a full one. Plugins that do
 not apply here (wrong platform, tool not installed, or tool not running) are
-not shown, unless you name one.
+not shown, unless you name one. `-v` lists them after the results, with the
+reason each one was skipped.
 
 With `-v`, info prints a section for each tool in place of the table, largest
 first, and the total last. Each section lists what the size holds, such as each
@@ -82,7 +83,7 @@ declined with a warning, and sudo actions run only when sudo needs no password.
 it would delete, or the command it would run. It asks nothing and changes
 nothing. With `-v`, `clean` prints a section for each tool in place of the
 table, with each action's rows under its name and tier, before the plan or the
-first prompt.
+first prompt. Like `info`, it then lists the skipped plugins and the reasons.
 """
 
 _INFO_EXIT_CODES = """\
