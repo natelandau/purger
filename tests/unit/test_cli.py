@@ -28,7 +28,7 @@ from purger.plugin import (
     SizeBreakdownRow,
     once_per_run,
 )
-from purger.reports import ActionReport, PluginReport, SkippedPlugin, SkipReason, Status
+from purger.reports import ActionReport, PluginReport, SkipReason, Status
 from tests.conftest import EMPTY_SETTINGS, make_action, make_plugin, table_row
 
 _SIZE = 100
@@ -197,6 +197,58 @@ def test_named_unavailable_plugin_warns(
     assert doc["skipped"] == [{"name": "macish", "reason": "platform"}]
     assert "macish" in captured.err
     assert "linux" in captured.err
+
+
+def test_measuring_rows_only_for_plugins_that_can_run(
+    patch_registry: Callable[..., None], mocker: MockerFixture
+) -> None:
+    """Verify only plugins that pass their checks get a measuring row."""
+    # Given one plugin that runs here and one whose check fails
+    patch_registry(make_plugin(name="ready"), make_plugin(name="absent", skip_unless=lambda: False))
+    display = mocker.patch("purger.cli.MeasureDisplay", autospec=True)
+
+    # When
+    _run("info", "-vv")
+
+    # Then
+    display.assert_called_once_with(["ready"])
+
+
+@pytest.mark.parametrize("verbose", [(), ("-v",), ("-vv",)])
+def test_skipped_plugins_listed_only_when_verbose(
+    verbose: tuple[str, ...],
+    patch_registry: Callable[..., None],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify -v and -vv list plugins that cannot run, and a plain run does not."""
+    # Given
+    patch_registry(make_plugin(name="ready"), make_plugin(name="absent", skip_unless=lambda: False))
+
+    # When
+    _run("info", *verbose)
+
+    # Then
+    out = capsys.readouterr().out
+    assert ("Skipped plugins" in out) is bool(verbose)
+    assert ("absent: its tool is not available" in out) is bool(verbose)
+
+
+def test_named_plugin_that_cannot_run_warns_without_verbose(
+    patch_registry: Callable[..., None], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Verify a plugin the user named still gets a warning when it cannot run."""
+    # Given
+    patch_registry(make_plugin(name="ready"), make_plugin(name="absent", skip_unless=lambda: False))
+
+    # When
+    code = _run("info", "ready", "absent")
+
+    # Then
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+    assert code == ExitCode.OK
+    assert "absent is not available on this machine" in output
+    assert "Skipped plugins" not in output
 
 
 @pytest.mark.parametrize(
@@ -894,8 +946,8 @@ def test_main_json_equals_usage_error_is_json(
 def test_measure_keeps_plugin_order_when_plugins_finish_out_of_order(
     mocker: MockerFixture,
 ) -> None:
-    """Verify concurrent measuring reports plugins and skips in plugin order."""
-    # Given alpha finishes only after beta starts, and gamma does not apply here
+    """Verify concurrent measuring reports plugins in plugin order."""
+    # Given alpha finishes only after beta starts
     beta_started = threading.Event()
 
     def measure(
@@ -908,39 +960,16 @@ def test_measure_keeps_plugin_order_when_plugins_finish_out_of_order(
         return _fake_measure(plugin, include_dangerous=include_dangerous, settings=settings)
 
     mocker.patch("purger.cli.measure_plugin", autospec=True, side_effect=measure)
-    mocker.patch(
-        "purger.cli.skip_reason",
-        autospec=True,
-        side_effect=lambda plugin, processes: (
-            SkipReason.PLATFORM if plugin.name == "gamma" else None
-        ),
-    )
-    plugins = [make_plugin(name=name) for name in ("alpha", "beta", "gamma", "delta")]
+    plugins = [make_plugin(name=name) for name in ("alpha", "beta", "delta")]
     display = mocker.Mock(spec=MeasureDisplay)
 
     # When
-    scan = cli._measure(plugins, dangerous=False, display=display, config=Config())
+    reports = cli._measure(plugins, dangerous=False, display=display, config=Config())
 
     # Then
-    assert [r.plugin.name for r in scan.reports] == ["alpha", "beta", "delta"]
-    assert [s.name for s in scan.skipped] == ["gamma"]
+    assert [r.plugin.name for r in reports] == ["alpha", "beta", "delta"]
     finished = {call.kwargs["name"] for call in display.finish.call_args_list}
-    assert finished == {"alpha", "beta", "gamma", "delta"}
-
-
-def test_measure_shares_one_process_table(mocker: MockerFixture) -> None:
-    """Verify every plugin in one scan checks for busy tools against the same process table."""
-    # Given
-    mocker.patch("purger.cli.measure_plugin", autospec=True, side_effect=_fake_measure)
-    skip = mocker.patch("purger.cli.skip_reason", autospec=True, return_value=None)
-    plugins = [make_plugin(name=name) for name in ("alpha", "beta", "gamma")]
-
-    # When
-    cli._measure(plugins, dangerous=False, display=None, config=Config())
-
-    # Then
-    tables = {id(call.kwargs["processes"]) for call in skip.call_args_list}
-    assert len(tables) == 1
+    assert finished == {"alpha", "beta", "delta"}
 
 
 @pytest.fixture
@@ -1072,7 +1101,6 @@ def test_measure_hands_each_plugin_its_configured_settings(mocker: MockerFixture
     """Verify measuring passes every plugin the settings the run's config resolves for it."""
     # Given
     measure = mocker.patch("purger.cli.measure_plugin", autospec=True, side_effect=_fake_measure)
-    mocker.patch("purger.cli.skip_reason", autospec=True, return_value=None)
     plugin = make_plugin(
         name="alpha",
         settings=(
@@ -1088,40 +1116,6 @@ def test_measure_hands_each_plugin_its_configured_settings(mocker: MockerFixture
     settings = measure.call_args.kwargs["settings"]
     assert settings == config.settings_for(plugin)
     assert settings.get_integer("depth") == 8
-
-
-def test_measure_skips_a_plugin_whose_configuration_check_fails() -> None:
-    """Verify a configuration check returning False skips the plugin as not configured."""
-    # Given
-    plugin = make_plugin(name="alpha", skip_unless_configured=lambda _: False)
-
-    # When
-    scan = cli._measure([plugin], dangerous=False, display=None, config=Config())
-
-    # Then
-    assert scan.reports == []
-    assert scan.skipped == [SkippedPlugin(name="alpha", reason=SkipReason.NOT_CONFIGURED)]
-
-
-def test_measure_does_not_check_configuration_of_a_plugin_that_is_unavailable() -> None:
-    """Verify an unavailable plugin is skipped before its configuration check runs."""
-    # Given
-    calls: list[str] = []
-
-    def is_configured(_: PluginSettings) -> bool:
-        calls.append("is_configured")
-        return False
-
-    plugin = make_plugin(
-        name="alpha", skip_unless=lambda: False, skip_unless_configured=is_configured
-    )
-
-    # When
-    scan = cli._measure([plugin], dangerous=False, display=None, config=Config())
-
-    # Then
-    assert scan.skipped == [SkippedPlugin(name="alpha", reason=SkipReason.UNAVAILABLE)]
-    assert calls == []
 
 
 def test_info_verbose_prints_size_breakdown_rows(

@@ -13,6 +13,7 @@ import psutil
 import pytest
 from pytest_mock import MockerFixture
 
+from purger.config import Config
 from purger.plugin import (
     OperatingSystem,
     Plugin,
@@ -23,6 +24,7 @@ from purger.registry import (
     DuplicatePluginError,
     ProcessTable,
     UnknownPluginError,
+    check_plugins,
     discover_plugins,
     is_busy,
     is_configured,
@@ -543,3 +545,75 @@ def test_is_configured_false_when_skip_unless_configured_raises(
     assert result is False
     assert "broken" in caplog.text
     assert [record.levelno for record in caplog.records] == [logging.WARNING]
+
+
+def _no_settings(plugin: Plugin) -> PluginSettings:
+    return Config().settings_for(plugin)
+
+
+def test_check_splits_plugins_in_plugin_order(mocker: MockerFixture) -> None:
+    """Verify checking keeps runnable and skipped plugins each in plugin order."""
+    # Given beta and delta do not apply here
+    mocker.patch(
+        "purger.registry.skip_reason",
+        autospec=True,
+        side_effect=lambda plugin, processes: (
+            SkipReason.PLATFORM if plugin.name in {"beta", "delta"} else None
+        ),
+    )
+    plugins = [make_plugin(name=name) for name in ("alpha", "beta", "gamma", "delta")]
+
+    # When
+    usable, skipped = check_plugins(plugins, settings_for=_no_settings)
+
+    # Then
+    assert [p.name for p in usable] == ["alpha", "gamma"]
+    assert [s.name for s in skipped] == ["beta", "delta"]
+
+
+def test_check_shares_one_process_table(mocker: MockerFixture) -> None:
+    """Verify every plugin in one scan checks for busy tools against the same process table."""
+    # Given
+    skip = mocker.patch("purger.registry.skip_reason", autospec=True, return_value=None)
+    plugins = [make_plugin(name=name) for name in ("alpha", "beta", "gamma")]
+
+    # When
+    check_plugins(plugins, settings_for=_no_settings)
+
+    # Then
+    tables = {id(call.kwargs["processes"]) for call in skip.call_args_list}
+    assert len(tables) == 1
+
+
+def test_check_skips_a_plugin_whose_configuration_check_fails() -> None:
+    """Verify a configuration check returning False skips the plugin as not configured."""
+    # Given
+    plugin = make_plugin(name="alpha", skip_unless_configured=lambda _: False)
+
+    # When
+    usable, skipped = check_plugins([plugin], settings_for=_no_settings)
+
+    # Then
+    assert usable == []
+    assert skipped == [SkippedPlugin(name="alpha", reason=SkipReason.NOT_CONFIGURED)]
+
+
+def test_check_does_not_check_configuration_of_a_plugin_that_is_unavailable() -> None:
+    """Verify an unavailable plugin is skipped before its configuration check runs."""
+    # Given
+    calls: list[str] = []
+
+    def is_configured(_: PluginSettings) -> bool:
+        calls.append("is_configured")
+        return False
+
+    plugin = make_plugin(
+        name="alpha", skip_unless=lambda: False, skip_unless_configured=is_configured
+    )
+
+    # When
+    _, skipped = check_plugins([plugin], settings_for=_no_settings)
+
+    # Then
+    assert skipped == [SkippedPlugin(name="alpha", reason=SkipReason.UNAVAILABLE)]
+    assert calls == []

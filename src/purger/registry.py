@@ -15,6 +15,7 @@ import psutil
 from nclutils.sh import which
 
 from purger import plugins as _builtin_plugins
+from purger.concurrency import map_as_completed
 from purger.plugin import Plugin, PluginSettings
 from purger.reports import SkippedPlugin, SkipReason
 
@@ -163,6 +164,42 @@ def skip_reason(
     if not _available(plugin) or is_busy(plugin, processes=processes):
         return SkipReason.UNAVAILABLE
     return None
+
+
+def check_plugins(
+    plugins: Sequence[Plugin], *, settings_for: Callable[[Plugin], PluginSettings]
+) -> tuple[list[Plugin], list[SkippedPlugin]]:
+    """Split plugins into those that can run here and those that cannot, keeping plugin order.
+
+    A plugin can run when it applies to this machine and its configuration check
+    passes. Some availability checks run the tool itself, so the checks run side
+    by side and share one process table.
+
+    Args:
+        plugins: Plugins to check.
+        settings_for: Resolves the settings each plugin's configuration check receives.
+
+    Returns:
+        tuple[list[Plugin], list[SkippedPlugin]]: The plugins that can run, and the
+            plugins left out with the reason.
+    """
+    processes = ProcessTable()
+
+    def reason_for(plugin: Plugin) -> SkipReason | None:
+        reason = skip_reason(plugin, processes=processes)
+        if reason is None and not is_configured(plugin, settings_for(plugin)):
+            return SkipReason.NOT_CONFIGURED
+        return reason
+
+    reasons = dict(map_as_completed(reason_for, items=plugins))
+    usable: list[Plugin] = []
+    skipped: list[SkippedPlugin] = []
+    for index, plugin in enumerate(plugins):
+        if (reason := reasons[index]) is None:
+            usable.append(plugin)
+        else:
+            skipped.append(SkippedPlugin(name=plugin.name, reason=reason))
+    return usable, skipped
 
 
 def _available(plugin: Plugin) -> bool:

@@ -6,13 +6,22 @@ import pytest
 from rich.console import Console
 
 from purger.measure_display import MeasureDisplay
-from purger.reports import PluginReport, SkippedPlugin, SkipReason
+from purger.reports import PluginReport
 from tests.conftest import EMPTY_SETTINGS, make_plugin
 
 
 def _console() -> tuple[Console, io.StringIO]:
     buffer = io.StringIO()
     return Console(file=buffer, force_terminal=True, width=80), buffer
+
+
+def _report(total_size_bytes: int | None) -> PluginReport:
+    return PluginReport(
+        settings=EMPTY_SETTINGS,
+        plugin=make_plugin(name="uv"),
+        total_size_bytes=total_size_bytes,
+        actions=[],
+    )
 
 
 def _status(display: MeasureDisplay, name: str) -> str:
@@ -38,30 +47,17 @@ def test_measure_display_rows_start_measuring() -> None:
     ("result", "expected"),
     [
         (
-            PluginReport(
-                settings=EMPTY_SETTINGS,
-                plugin=make_plugin(name="uv"),
-                total_size_bytes=3_000_000,
-                actions=[],
-            ),
+            _report(3_000_000),
             "3.0 MB",
         ),
         (
-            PluginReport(
-                settings=EMPTY_SETTINGS,
-                plugin=make_plugin(name="uv"),
-                total_size_bytes=None,
-                actions=[],
-            ),
+            _report(None),
             "size unknown",
         ),
-        (SkippedPlugin(name="uv", reason=SkipReason.PLATFORM), "skipped (platform)"),
     ],
 )
-def test_measure_display_finish_shows_result(
-    result: PluginReport | SkippedPlugin, expected: str
-) -> None:
-    """Verify a finished row shows the plugin's total size or why it was skipped."""
+def test_measure_display_finish_shows_result(result: PluginReport, expected: str) -> None:
+    """Verify a finished row shows the plugin's total size."""
     # Given a display with one plugin row
     console, _ = _console()
     display = MeasureDisplay(["uv"], console=console)
@@ -83,12 +79,7 @@ def test_measure_display_is_transient_and_stops() -> None:
     with MeasureDisplay(["uv"], console=console) as display:
         display.finish(
             "uv",
-            PluginReport(
-                settings=EMPTY_SETTINGS,
-                plugin=make_plugin(name="uv"),
-                total_size_bytes=1,
-                actions=[],
-            ),
+            _report(1),
         )
 
     # Then it is transient and no longer refreshing
@@ -104,7 +95,10 @@ def test_measure_display_silent_without_terminal() -> None:
 
     # When a full measuring pass runs
     with MeasureDisplay(["uv"], console=console) as display:
-        display.finish("uv", SkippedPlugin(name="uv", reason=SkipReason.PLATFORM))
+        display.finish(
+            "uv",
+            _report(1),
+        )
 
     # Then nothing was written
     assert buffer.getvalue() == ""

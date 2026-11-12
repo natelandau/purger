@@ -4,10 +4,10 @@ import json
 import os
 import sys
 from collections.abc import Callable, Iterable, Sequence
+from contextlib import nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import IntEnum
-from functools import partial
 from typing import Annotated, Any
 
 from cyclopts import App, CycloptsError, Parameter
@@ -42,12 +42,10 @@ from purger.output import (
 )
 from purger.plugin import Plugin, RiskLevel, reset_run_caches
 from purger.registry import (
-    ProcessTable,
     UnknownPluginError,
+    check_plugins,
     discover_plugins,
-    is_configured,
     select_plugins,
-    skip_reason,
 )
 from purger.reports import (
     ActionReport,
@@ -188,25 +186,6 @@ def _error(code: str, message: str, *, exit_code: ExitCode, json_output: bool) -
     return exit_code
 
 
-def _measure_one(
-    plugin: Plugin,
-    *,
-    dangerous: bool,
-    processes: ProcessTable,
-    config: Config,
-    with_details: bool = False,
-) -> PluginReport | SkippedPlugin:
-    reason = skip_reason(plugin, processes=processes)
-    if reason is not None:
-        return SkippedPlugin(name=plugin.name, reason=reason)
-    settings = config.settings_for(plugin)
-    if not is_configured(plugin, settings):
-        return SkippedPlugin(name=plugin.name, reason=SkipReason.NOT_CONFIGURED)
-    return measure_plugin(
-        plugin, include_dangerous=dangerous, settings=settings, with_details=with_details
-    )
-
-
 def _measure(
     plugins: Sequence[Plugin],
     *,
@@ -214,39 +193,40 @@ def _measure(
     display: MeasureDisplay | None,
     config: Config,
     with_details: bool = False,
-) -> _Scan:
-    """Check and measure plugins concurrently, keeping results in plugin order.
+) -> list[PluginReport]:
+    """Measure plugins concurrently, keeping results in plugin order.
 
     Plugins spend most of their time waiting on tool commands, so measuring
     them side by side shortens the wait.
     """
-    results: dict[int, PluginReport | SkippedPlugin] = {}
-    for index, result in map_as_completed(
-        partial(
-            _measure_one,
-            dangerous=dangerous,
-            processes=ProcessTable(),
-            config=config,
+    results: dict[int, PluginReport] = {}
+    for index, report in map_as_completed(
+        lambda plugin: measure_plugin(
+            plugin,
+            include_dangerous=dangerous,
+            settings=config.settings_for(plugin),
             with_details=with_details,
         ),
         items=plugins,
     ):
-        results[index] = result
+        results[index] = report
         if display is not None:
-            display.finish(name=plugins[index].name, result=result)
-    scan = _Scan(reports=[], skipped=[])
-    for _, result in sorted(results.items()):
-        if isinstance(result, SkippedPlugin):
-            scan.skipped.append(result)
-        else:
-            scan.reports.append(result)
-    return scan
+            display.finish(name=plugins[index].name, result=report)
+    return [report for _, report in sorted(results.items())]
 
 
 def _scan(
-    names: Sequence[str], *, dangerous: bool, json_output: bool, config: Config, with_details: bool
+    names: Sequence[str],
+    *,
+    dangerous: bool,
+    config: Config,
+    show_progress: bool,
+    with_details: bool,
 ) -> _Scan:
-    """Select and measure plugins, with a live row per plugin unless output is JSON.
+    """Select and check plugins, then measure those that can run here.
+
+    With progress shown, a spinner runs while plugins are checked, and only
+    plugins that can run get a live measuring row.
 
     Raises:
         UnknownPluginError: If a requested plugin name is not registered.
@@ -254,25 +234,20 @@ def _scan(
     selection = select_plugins(
         registry=discover_plugins(), names=names, skip=frozenset(config.skip)
     )
-    if json_output:
-        scan = _measure(
-            selection.plugins,
-            dangerous=dangerous,
-            display=None,
-            config=config,
-            with_details=with_details,
+    checking = (
+        pp.step("Checking which plugins can run", ephemeral=True)
+        if show_progress
+        else nullcontext()
+    )
+    with checking:
+        usable, skipped = check_plugins(selection.plugins, settings_for=config.settings_for)
+    skipped.extend(selection.disabled)
+    display = MeasureDisplay([p.name for p in usable]) if show_progress else nullcontext()
+    with display as live:
+        reports = _measure(
+            usable, dangerous=dangerous, display=live, config=config, with_details=with_details
         )
-    else:
-        with MeasureDisplay([plugin.name for plugin in selection.plugins]) as display:
-            scan = _measure(
-                selection.plugins,
-                dangerous=dangerous,
-                display=display,
-                config=config,
-                with_details=with_details,
-            )
-    scan.skipped.extend(selection.disabled)
-    return scan
+    return _Scan(reports=reports, skipped=skipped)
 
 
 def _begin(
@@ -299,8 +274,8 @@ def _begin(
         return _scan(
             names,
             dangerous=dangerous,
-            json_output=json_output,
             config=config,
+            show_progress=not json_output,
             # Detail costs a per-path walk, so it is built only when output shows it.
             with_details=verbose > 0 or json_output,
         )
@@ -320,12 +295,23 @@ def _begin(
         )
 
 
-def _report_skipped(skipped: list[SkippedPlugin], names: Sequence[str]) -> None:
-    """Warn about plugins the user named that cannot run here."""
+def _report_skipped(
+    skipped: list[SkippedPlugin], *, names: Sequence[str], list_unnamed: bool
+) -> None:
+    """Warn about named plugins that cannot run here, and optionally list the rest.
+
+    A named plugin was asked for, so its absence is always worth a warning. The
+    others are routine on any machine and are listed only on request.
+    """
     requested = set(names)
+    unnamed: list[str] = []
     for item in skipped:
         if item.name in requested:
             pp.warning(f"{item.name} is not available on this machine: {_reason_text(item.reason)}")
+        else:
+            unnamed.append(f"{item.name}: {_reason_text(item.reason)}")
+    if list_unnamed and unnamed:
+        pp.info("Skipped plugins:", details=unnamed)
 
 
 def _print_table(reports: list[PluginReport]) -> None:
@@ -479,7 +465,7 @@ def info(
         _emit_json(info_document(reports=scan.reports, skipped=scan.skipped))
     else:
         _print_overview(scan.reports, verbosity=verbosity, by_action=False)
-    _report_skipped(skipped=scan.skipped, names=plugins)
+    _report_skipped(scan.skipped, names=plugins, list_unnamed=verbosity > 0 and not json_output)
     return ExitCode.OK
 
 
@@ -525,7 +511,7 @@ def clean(
 
     if not json_output:
         _print_overview(scan.reports, verbosity=verbosity, by_action=True)
-    _report_skipped(skipped=scan.skipped, names=plugins)
+    _report_skipped(scan.skipped, names=plugins, list_unnamed=verbosity > 0 and not json_output)
 
     interactive = sys.stdin.isatty() and not json_output
     opts = CleanOptions(dangerous=dangerous, dry_run=dry_run, yes=yes, interactive=interactive)
