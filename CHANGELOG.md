@@ -1,3 +1,9 @@
+## v0.4.1 (2026-11-12)
+
+### Fix
+
+- **cli**: ask clean confirmations with rich prompts (#14)
+
 ## v0.4.0 (2026-11-12)
 
 ### Feat
