@@ -6,7 +6,7 @@
 
 ## Checks
 
-- `uv run duty test` and `uv run duty lint`. Both skip work when the tree already passed. A filtered `uv run duty test -k NAME` always runs. Do not clear caches to force a run.
+- `uv run duty test` and `uv run duty lint`. `test` and the prek step of `lint` skip work when the tree already passed. The ruff, ty, and typos checks always run. A filtered `uv run duty test -k NAME` always runs. Do not clear caches to force a run.
 - `ty` checks `tests/` too, so test code needs types that ty accepts.
 
 ## Invariants to keep in one place

@@ -83,7 +83,7 @@ def clean(ctx: Context) -> None:
 def ruff(ctx: Context) -> None:
     """Check the code quality with ruff."""
     ctx.run(
-        gated("ruff", ["ruff", "check", "--config", "pyproject.toml", "--no-fix", *PY_SRC_LIST]),
+        ["ruff", "check", "--config", "pyproject.toml", "--no-fix", *PY_SRC_LIST],
         title=pyprefix("code quality check"),
     )
 
@@ -92,7 +92,7 @@ def ruff(ctx: Context) -> None:
 def format(ctx: Context) -> None:  # noqa: A001
     """Format the code with ruff."""
     ctx.run(
-        gated("format", ["ruff", "format", "--check", "--config", "pyproject.toml", *FORMAT_LIST]),
+        ["ruff", "format", "--check", "--config", "pyproject.toml", *FORMAT_LIST],
         title=pyprefix("code formatting"),
     )
 
@@ -101,7 +101,7 @@ def format(ctx: Context) -> None:  # noqa: A001
 def ty(ctx: Context) -> None:
     """Check the code with ty."""
     ctx.run(
-        gated("ty", ["ty", "check", "src/", "tests/"]),
+        ["ty", "check", "src/", "tests/"],
         title="ty check",
     )
 
@@ -110,7 +110,7 @@ def ty(ctx: Context) -> None:
 def typos(ctx: Context) -> None:
     """Check the code with typos."""
     ctx.run(
-        gated("typos", ["typos", "--config", ".typos.toml"]),
+        ["typos", "--config", ".typos.toml"],
         title=pyprefix("typos check"),
     )
 

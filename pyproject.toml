@@ -47,11 +47,12 @@
         "commitizen>=4.19.3",
         "coverage>=7.17.2",
         "duty>=1.10.1",
-        "gate-cache>=0.6.0",
+        "gate-cache>=0.12.0",
         "prek>=0.5.10",
         "pytest-clarity>=1.0.1",
         "pytest-cov>=7.1.0",
         "pytest-mock>=3.17.0",
+        "pytest-randomly>=5.1.0",
         "pytest-repeat>=0.9.4",
         "pytest-sugar>=1.1.1",
         "pytest-xdist>=3.8.0",
@@ -74,7 +75,7 @@
     version_provider           = "uv"
 
 [tool.coverage.report] # https://coverage.readthedocs.io/en/latest/config.html#report
-    exclude_lines = ['def __repr__', 'if TYPE_CHECKING', 'pragma: no cover']
+    exclude_also  = ['def __repr__', 'if TYPE_CHECKING']
     fail_under    = 90
     show_missing  = true
     skip_covered  = true
@@ -84,19 +85,20 @@
     branch       = true
     command_line = "--module pytest"
     data_file    = ".cache/coverage"
-    omit         = ["tests/*"]
     source       = ["src"]
 
 [tool.coverage.xml]
     output = ".cache/coverage.xml"
 
-[tool.pytest.ini_options]
-
-    addopts        = "--color=yes --strict-config --strict-markers -n auto --dist loadfile"
-    cache_dir      = ".cache/pytest"
-    filterwarnings = ['error']
-    testpaths      = ["tests"]
-    xfail_strict   = true
+[tool.pytest] # https://docs.pytest.org/en/stable/reference/reference.html#ini-options-ref
+    # Worker startup outweighs the work past four processes for this suite's sub-millisecond tests
+    addopts          = ["-n", "auto", "--maxprocesses=4", "--dist", "worksteal"]
+    cache_dir        = ".cache/pytest"
+    filterwarnings   = ["error"]
+    minversion       = "9.0"
+    required_plugins = ["pytest-cov", "pytest-mock", "pytest-randomly", "pytest-xdist"]
+    strict           = true
+    testpaths        = ["tests"]
 
 [tool.ruff] # https://github.com/charliermarsh/ruff
 
