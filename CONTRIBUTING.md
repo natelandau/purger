@@ -52,7 +52,7 @@ uv run duty test
 uv run duty lint
 ```
 
-The `test` task and the lint tasks skip their work when the same files already passed. To run a subset of the tests, pass pytest arguments. A filtered run always executes:
+The `test` task and the prek hooks in `lint` skip their work when the same files already passed. The other lint checks always run. Tests run in a random order, and each run prints its seed. To repeat a failed order, pass `--randomly-seed=SEED`. To run a subset of the tests, pass pytest arguments. A filtered run always executes:
 
 ```bash
 uv run duty test -k safety
